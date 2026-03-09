@@ -361,12 +361,6 @@
     {% if album.description %}{{ album.description }}{% else %}Upload your photos and videos to this shared album.{% endif %}
   </div>
 
-  <!-- Uploader name (only shown if not logged in) -->
-  {% if not current_user.is_authenticated %}
-  <label for="uploader_name">Your Name</label>
-  <input type="text" id="uploader_name" placeholder="e.g. Sarah" maxlength="64">
-  {% endif %}
-
   <!-- Drop Zone -->
   <div class="drop-zone" id="dropZone">
     <input type="file" id="fileInput" multiple
@@ -473,15 +467,6 @@ function escHtml(str) {
 async function startUpload() {
   if (!selectedFiles.length) return;
 
-  {% if not current_user.is_authenticated %}
-  const name = document.getElementById('uploader_name').value.trim();
-  if (!name) {
-    document.getElementById('uploader_name').focus();
-    document.getElementById('uploader_name').style.borderColor = '#c0392b';
-    return;
-  }
-  {% endif %}
-
   const btn = document.getElementById('uploadBtn');
   btn.disabled = true;
   btn.textContent = 'Uploading…';
@@ -495,11 +480,6 @@ async function startUpload() {
   for (let i = 0; i < selectedFiles.length; i += batchSize) {
     const batch = selectedFiles.slice(i, i + batchSize);
     const form = new FormData();
-
-    {% if not current_user.is_authenticated %}
-    form.append('uploader_name', document.getElementById('uploader_name').value.trim());
-    {% endif %}
-
     batch.forEach(f => form.append('files', f));
     const batchIndices = batch.map((_, j) => i + j);
 

@@ -350,7 +350,17 @@ def logout():
 @login_required
 def dashboard():
     albums = Album.query.filter_by(owner_id=current_user.id).order_by(Album.created_at.desc()).all()
-    return render_template('dashboard.html', albums=albums)
+
+    # Albums the user has contributed to but doesn't own
+    contributed_ids = db.session.query(Photo.album_id).filter(
+        Photo.uploader_id == current_user.id
+    ).distinct().subquery()
+    contributed = Album.query.filter(
+        Album.id.in_(contributed_ids),
+        Album.owner_id != current_user.id
+    ).order_by(Album.created_at.desc()).all()
+
+    return render_template('dashboard.html', albums=albums, contributed=contributed)
 
 
 @app.route('/album/create', methods=['GET', 'POST'])
@@ -436,26 +446,22 @@ def _delete_photo_files(photo):
 # ──────────────────────────────────────────────
 
 @app.route('/share/<token>', methods=['GET'])
+@login_required
 def album_upload(token):
-    """Public shareable upload page."""
+    """Shareable upload page — requires login."""
     album = Album.query.filter_by(token=token).first_or_404()
     return render_template('album_upload.html', album=album)
 
 
 @app.route('/share/<token>/upload', methods=['POST'])
+@login_required
 @limiter.limit("60 per hour")
 def do_upload(token):
     """Handle file upload from share page."""
     album = Album.query.filter_by(token=token).first_or_404()
 
-    uploader_id = None
-    uploader_name = request.form.get('uploader_name', 'Anonymous').strip() or 'Anonymous'
-
-    if current_user.is_authenticated:
-        uploader_id = current_user.id
-        uploader_name = current_user.username
-    elif not album.allow_anonymous:
-        return jsonify({'error': 'This album requires login to upload.'}), 403
+    uploader_id = current_user.id
+    uploader_name = current_user.username
 
     files = request.files.getlist('files')
     if not files:

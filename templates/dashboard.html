@@ -182,19 +182,74 @@
   <a href="{{ url_for('create_album') }}" class="btn btn-primary">Create Album</a>
 </div>
 {% endif %}
+
+{% if contributed %}
+<div class="page-header" style="margin-top:3rem;">
+  <h1 style="font-size:1.6rem;">Contributed To</h1>
+  <p>Albums you've uploaded files to.</p>
+</div>
+<div class="albums-grid">
+  {% for album in contributed %}
+  <div class="album-card">
+    <a href="{{ url_for('album_upload', token=album.token) }}" class="album-thumb">
+      {% if album.cover_photo %}
+        <img src="{{ url_for('serve_media', filename='thumb_' + album.cover_photo.stored_filename if album.cover_photo.has_thumbnail else album.cover_photo.stored_filename) }}"
+             alt="{{ album.name }}" loading="lazy">
+      {% else %}
+        <span class="album-thumb-placeholder">⬛</span>
+      {% endif %}
+    </a>
+    <div class="album-info">
+      <h3>{{ album.name }}</h3>
+      {% if album.description %}
+      <p style="font-size:0.85rem; color:var(--text-dim); margin-top:0.2rem; line-height:1.4;">
+        {{ album.description|truncate(80) }}
+      </p>
+      {% endif %}
+      <div class="album-meta">
+        <span>{{ album.photo_count }} file{{ 's' if album.photo_count != 1 }}</span>
+        <span>{{ album.created_at.strftime('%b %d, %Y') }}</span>
+        <span class="badge badge-dim">by {{ album.owner.username }}</span>
+      </div>
+      <div class="album-actions">
+        <a href="{{ url_for('album_upload', token=album.token) }}" class="btn btn-ghost btn-sm">
+          Upload More →
+        </a>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
 function copyLink(url) {
-  navigator.clipboard.writeText(url).then(() => {
+  function onSuccess() {
     const flash = document.createElement('div');
     flash.className = 'flash success';
     flash.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:300;max-width:320px;animation:slideIn .2s ease;';
     flash.innerHTML = '<span>Share link copied to clipboard!</span>';
     document.body.appendChild(flash);
     setTimeout(() => flash.remove(), 3000);
-  });
+  }
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(url).then(onSuccess).catch(() => fallbackCopy(url, onSuccess));
+  } else {
+    fallbackCopy(url, onSuccess);
+  }
+}
+
+function fallbackCopy(text, onSuccess) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try { document.execCommand('copy'); onSuccess(); } catch (_) {}
+  document.body.removeChild(ta);
 }
 </script>
 {% endblock %}
