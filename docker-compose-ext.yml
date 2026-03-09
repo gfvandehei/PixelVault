@@ -11,7 +11,7 @@ services:
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-500}
       - FLASK_DEBUG=false
     volumes:
-      - ${UPLOAD_DIRECTORY}:/app/uploads
+      - ${UPLOAD_FOLDER}:/app/uploads
       - ${DATA_DIRECTORY}:/app/instance
     ports:
       - 5000:5000
