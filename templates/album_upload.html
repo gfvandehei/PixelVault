@@ -299,45 +299,197 @@
       font-family: var(--font-sans);
     }
 
-    /* ── Gallery preview ── */
+    /* ── Gallery ── */
     .gallery-section {
+      width: 100%;
+      max-width: 960px;
       margin-top: 2rem;
-      padding-top: 1.5rem;
-      border-top: 1px solid var(--border);
+    }
+
+    .gallery-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--border);
     }
 
     .gallery-title {
       font-family: var(--font-serif);
-      font-size: 1rem;
+      font-size: 1.4rem;
       font-weight: 300;
-      color: var(--text-dim);
-      margin-bottom: 0.75rem;
+      color: var(--text);
+    }
+
+    .gallery-count {
+      font-size: 0.78rem;
+      font-family: var(--font-mono);
+      color: var(--text-muted);
     }
 
     .gallery-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-      gap: 0.5rem;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 0.75rem;
     }
 
-    .gallery-thumb {
+    .gallery-item {
+      position: relative;
       aspect-ratio: 1;
-      border-radius: 4px;
       overflow: hidden;
+      border-radius: var(--radius);
       background: var(--bg3);
+      cursor: pointer;
     }
 
-    .gallery-thumb img {
+    .gallery-item img, .gallery-item video {
       width: 100%;
       height: 100%;
       object-fit: cover;
+      transition: transform 0.25s;
+      display: block;
+    }
+
+    .gallery-item:hover img, .gallery-item:hover video { transform: scale(1.05); }
+
+    .gallery-overlay {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to top, rgba(0,0,0,0.75) 0%, transparent 50%);
+      opacity: 0;
+      transition: opacity 0.2s;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      padding: 0.6rem 0.75rem;
+    }
+
+    .gallery-item:hover .gallery-overlay { opacity: 1; }
+
+    .gallery-overlay-name {
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.9);
+      font-family: var(--font-mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .gallery-overlay-meta {
+      font-size: 0.67rem;
+      color: rgba(255,255,255,0.55);
+      margin-top: 0.1rem;
+    }
+
+    .video-badge {
+      position: absolute;
+      top: 0.4rem;
+      left: 0.4rem;
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      font-size: 0.65rem;
+      font-family: var(--font-mono);
+      padding: 0.12rem 0.35rem;
+      border-radius: 3px;
     }
 
     .gallery-empty {
-      font-size: 0.8rem;
+      font-size: 0.85rem;
       color: var(--text-muted);
       font-family: var(--font-mono);
+      padding: 2rem 0;
+      text-align: center;
     }
+
+    /* ── Lightbox ── */
+    .lightbox {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.93);
+      z-index: 500;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+
+    .lightbox.active { display: flex; }
+
+    .lightbox-media {
+      max-width: 90vw;
+      max-height: 80vh;
+      object-fit: contain;
+      border-radius: var(--radius);
+    }
+
+    .lightbox-info {
+      margin-top: 1rem;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      font-family: var(--font-mono);
+    }
+
+    .lightbox-close {
+      position: absolute;
+      top: 1.5rem;
+      right: 1.5rem;
+      background: rgba(255,255,255,0.1);
+      border: none;
+      color: #fff;
+      font-size: 1.25rem;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .lightbox-close:hover { background: rgba(255,255,255,0.2); }
+
+    .lightbox-nav {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      background: rgba(255,255,255,0.08);
+      border: none;
+      color: #fff;
+      font-size: 1.5rem;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+
+    .lightbox-nav:hover { background: rgba(255,255,255,0.18); }
+    .lightbox-prev { left: 1.5rem; }
+    .lightbox-next { right: 1.5rem; }
+
+    .lightbox-download {
+      position: absolute;
+      top: 1.5rem;
+      right: 5rem;
+      background: rgba(255,255,255,0.1);
+      border: none;
+      color: #fff;
+      font-size: 0.85rem;
+      padding: 0.4rem 0.85rem;
+      border-radius: var(--radius);
+      cursor: pointer;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .lightbox-download:hover { background: rgba(255,255,255,0.2); }
 
     .footer-note {
       margin-top: 2rem;
@@ -389,14 +541,25 @@
     <p>Your files have been added to the album.</p>
     <button class="btn-more" onclick="resetUploader()">Upload more</button>
   </div>
+</div>
 
-  <!-- Gallery Preview -->
-  <div class="gallery-section">
-    <div class="gallery-title">Already in this album</div>
-    <div class="gallery-grid" id="galleryGrid">
-      <span class="gallery-empty">Loading...</span>
-    </div>
+<!-- Gallery -->
+<div class="gallery-section" id="gallerySection" style="display:none;">
+  <div class="gallery-header">
+    <div class="gallery-title">Album Photos</div>
+    <div class="gallery-count" id="galleryCount"></div>
   </div>
+  <div class="gallery-grid" id="galleryGrid"></div>
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox">
+  <button class="lightbox-close" onclick="closeLightbox()">✕</button>
+  <a id="lbDownload" href="#" download class="lightbox-download">⬇ Download</a>
+  <button class="lightbox-nav lightbox-prev" onclick="navLightbox(-1)">‹</button>
+  <button class="lightbox-nav lightbox-next" onclick="navLightbox(1)">›</button>
+  <div id="lbMedia"></div>
+  <div class="lightbox-info" id="lbInfo"></div>
 </div>
 
 <div class="footer-note">
@@ -534,33 +697,91 @@ function resetUploader() {
   document.getElementById('progressWrap').style.display = 'none';
   document.getElementById('progressBar').style.width = '0%';
   document.getElementById('successBanner').style.display = 'none';
+  loadGallery();
 }
 
-// ── Gallery ──
+// ── Gallery & Lightbox ──
+let allPhotos = [];
+let currentIdx = 0;
+
 async function loadGallery() {
   const grid = document.getElementById('galleryGrid');
+  const section = document.getElementById('gallerySection');
   try {
     const res = await fetch(`/api/album/${TOKEN}/photos`);
-    const photos = await res.json();
-    if (!photos.length) {
-      grid.innerHTML = '<span class="gallery-empty">No uploads yet.</span>';
+    allPhotos = await res.json();
+    if (!allPhotos.length) {
+      section.style.display = '';
+      grid.innerHTML = '<div class="gallery-empty">No uploads yet.</div>';
+      document.getElementById('galleryCount').textContent = '';
       return;
     }
-    grid.innerHTML = photos.slice(0, 12).map(p => `
-      <div class="gallery-thumb">
+    section.style.display = '';
+    document.getElementById('galleryCount').textContent = `${allPhotos.length} file${allPhotos.length !== 1 ? 's' : ''}`;
+    grid.innerHTML = allPhotos.map((p, i) => `
+      <div class="gallery-item" onclick="openLightbox(${i})">
         ${p.is_video
-          ? `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:1.5rem;">▶</div>`
-          : `<img src="${p.thumb_url}" alt="${escHtml(p.original_filename)}" loading="lazy">`
+          ? `<span class="video-badge">▶ VIDEO</span>
+             <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:2rem;">▶</div>`
+          : `<img src="${escHtml(p.thumb_url)}" alt="${escHtml(p.original_filename)}" loading="lazy">`
         }
+        <div class="gallery-overlay">
+          <div class="gallery-overlay-name">${escHtml(p.original_filename)}</div>
+          <div class="gallery-overlay-meta">${escHtml(p.uploader_name)} · ${escHtml(p.uploaded_at)}</div>
+        </div>
       </div>
     `).join('');
-    if (photos.length > 12) {
-      grid.innerHTML += `<div class="gallery-thumb" style="display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-family:var(--font-mono);font-size:0.8rem;">+${photos.length - 12} more</div>`;
-    }
   } catch (e) {
-    grid.innerHTML = '<span class="gallery-empty">Could not load.</span>';
+    section.style.display = '';
+    grid.innerHTML = '<div class="gallery-empty">Could not load gallery.</div>';
   }
 }
+
+function openLightbox(idx) {
+  currentIdx = idx;
+  renderLightbox();
+  document.getElementById('lightbox').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('active');
+  document.body.style.overflow = '';
+  document.getElementById('lbMedia').innerHTML = '';
+}
+
+function navLightbox(dir) {
+  currentIdx = (currentIdx + dir + allPhotos.length) % allPhotos.length;
+  renderLightbox();
+}
+
+function renderLightbox() {
+  const p = allPhotos[currentIdx];
+  const lbMedia = document.getElementById('lbMedia');
+  const lbInfo = document.getElementById('lbInfo');
+  const lbDownload = document.getElementById('lbDownload');
+
+  if (p.is_video) {
+    lbMedia.innerHTML = `<video src="${p.full_url}" controls class="lightbox-media" style="max-height:75vh;"></video>`;
+  } else {
+    lbMedia.innerHTML = `<img src="${p.full_url}" class="lightbox-media" alt="${escHtml(p.original_filename)}" style="max-height:80vh;">`;
+  }
+
+  lbInfo.textContent = `${p.original_filename} · ${p.uploader_name} · ${p.uploaded_at} · ${p.file_size}`;
+  lbDownload.href = p.full_url;
+  lbDownload.download = p.original_filename;
+}
+
+document.getElementById('lightbox').addEventListener('click', function(e) {
+  if (e.target === this) closeLightbox();
+});
+
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('lightbox').classList.contains('active')) return;
+  if (e.key === 'Escape') closeLightbox();
+  if (e.key === 'ArrowLeft') navLightbox(-1);
+  if (e.key === 'ArrowRight') navLightbox(1);
+});
 
 loadGallery();
 </script>
