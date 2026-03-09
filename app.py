@@ -1,9 +1,11 @@
 import os
+import re
 import uuid
 import mimetypes
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlparse, urljoin
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
@@ -48,6 +50,11 @@ ALLOWED_EXTENSIONS = {
     '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic',
     '.mp4', '.mov', '.avi', '.webm', '.mpg', '.mpeg'
 }
+
+# Input validation
+_RE_USERNAME = re.compile(r'^[a-zA-Z0-9_\-]+$')
+_RE_EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+MAX_PASSWORD_LEN = 1024  # prevent slow-hash DoS via huge passwords
 
 # ──────────────────────────────────────────────
 # Extensions
@@ -227,6 +234,15 @@ def save_file(file_storage, mime_type):
 
     return stored_name, file_size, has_thumbnail
 
+
+def is_safe_redirect(target):
+    """Return True only if target is a relative URL on the same host."""
+    if not target:
+        return False
+    ref = urlparse(request.host_url)
+    test = urlparse(urljoin(request.host_url, target))
+    return test.scheme in ('http', 'https') and ref.netloc == test.netloc
+
 # ──────────────────────────────────────────────
 # Routes — Auth
 # ──────────────────────────────────────────────
@@ -253,18 +269,27 @@ def register():
         errors = []
         if not username or len(username) < 3:
             errors.append("Username must be at least 3 characters.")
-        if not email or '@' not in email:
+        elif len(username) > 64:
+            errors.append("Username must be 64 characters or fewer.")
+        elif not _RE_USERNAME.match(username):
+            errors.append("Username may only contain letters, numbers, hyphens, and underscores.")
+        if not email or not _RE_EMAIL.match(email):
             errors.append("Please enter a valid email address.")
+        elif len(email) > 120:
+            errors.append("Email address is too long.")
         if len(password) < 8:
             errors.append("Password must be at least 8 characters.")
+        elif len(password) > MAX_PASSWORD_LEN:
+            errors.append("Password is too long.")
         if password != confirm:
             errors.append("Passwords do not match.")
-        if User.query.filter_by(username=username).first():
-            errors.append("Username already taken.")
-        if User.query.filter_by(email=email).first():
-            errors.append("Email already registered.")
-        if not AllowedEmail.query.filter_by(email=email).first():
-            errors.append("This email address has not been authorized to register.")
+        if not errors:
+            if User.query.filter_by(username=username).first():
+                errors.append("Username already taken.")
+            if User.query.filter_by(email=email).first():
+                errors.append("Email already registered.")
+            if not AllowedEmail.query.filter_by(email=email).first():
+                errors.append("This email address has not been authorized to register.")
 
         if errors:
             for e in errors:
@@ -289,9 +314,14 @@ def login():
         return redirect(url_for('dashboard'))
 
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
+        username = request.form.get('username', '').strip()[:64]
         password = request.form.get('password', '')
         remember = bool(request.form.get('remember'))
+
+        # Reject oversized password before touching the hash function
+        if len(password) > MAX_PASSWORD_LEN:
+            flash('Invalid username or password.', 'error')
+            return render_template('login.html', username=username)
 
         user = User.query.filter_by(username=username).first()
         if not user or not user.check_password(password):
@@ -300,7 +330,7 @@ def login():
 
         login_user(user, remember=remember)
         next_page = request.args.get('next')
-        return redirect(next_page or url_for('dashboard'))
+        return redirect(next_page if is_safe_redirect(next_page) else url_for('dashboard'))
 
     return render_template('login.html')
 
