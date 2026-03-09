@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}Admin — PixelVault{% endblock %}
+
+{% block head %}
+<style>
+  .admin-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    align-items: start;
+  }
+
+  @media (max-width: 768px) {
+    .admin-grid { grid-template-columns: 1fr; }
+  }
+
+  .section-title {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 1rem;
+  }
+
+  .email-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+  }
+
+  .email-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.65rem 0.9rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .email-row-info { flex: 1; min-width: 0; }
+
+  .email-row-addr {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .email-row-note {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 0.1rem;
+  }
+
+  .email-row-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .add-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .add-form-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .add-form-row input { flex: 1; }
+
+  .user-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+  }
+
+  .user-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.65rem 0.9rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .user-row-name {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--text);
+  }
+
+  .user-row-email {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 0.1rem;
+  }
+
+  .user-row-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    flex-shrink: 0;
+    text-align: right;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Admin Panel</h1>
+  <p>Manage authorized email addresses and view registered users.</p>
+</div>
+
+<div class="admin-grid">
+
+  <!-- Allowed Emails -->
+  <div>
+    <div class="card">
+      <div class="section-title">Authorized Emails</div>
+
+      <form method="POST" action="{{ url_for('admin_add_email') }}" class="add-form">
+        <div class="form-group" style="margin-bottom:0;">
+          <label for="new-email">Add Email Address</label>
+          <div class="add-form-row">
+            <input type="email" id="new-email" name="email" placeholder="user@example.com" required>
+            <button type="submit" class="btn btn-primary">Add</button>
+          </div>
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label for="new-note">Note (optional)</label>
+          <input type="text" id="new-note" name="note" placeholder="e.g. Alice's account" maxlength="256">
+        </div>
+      </form>
+
+      <div class="email-list">
+        {% if allowed_emails %}
+          {% for entry in allowed_emails %}
+          <div class="email-row">
+            <div class="email-row-info">
+              <div class="email-row-addr">{{ entry.email }}</div>
+              {% if entry.note %}
+                <div class="email-row-note">{{ entry.note }}</div>
+              {% endif %}
+            </div>
+            <div class="email-row-meta">{{ entry.added_at.strftime('%b %d, %Y') }}</div>
+            <form method="POST" action="{{ url_for('admin_remove_email', entry_id=entry.id) }}"
+                  onsubmit="return confirm('Remove {{ entry.email }} from allowed list?')">
+              <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+            </form>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="empty-state" style="padding:2rem 0;">
+            <p>No emails authorized yet. Add one above.</p>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Registered Users -->
+  <div>
+    <div class="card">
+      <div class="section-title">Registered Users ({{ users|length }})</div>
+
+      <div class="user-list">
+        {% if users %}
+          {% for user in users %}
+          <div class="user-row">
+            <div>
+              <div class="user-row-name">
+                {{ user.username }}
+                {% if user.is_admin %}
+                  <span class="badge badge-amber" style="margin-left:0.4rem;">admin</span>
+                {% endif %}
+              </div>
+              <div class="user-row-email">{{ user.email }}</div>
+            </div>
+            <div class="user-row-meta">
+              {{ user.albums|length }} album{{ 's' if user.albums|length != 1 }}<br>
+              {{ user.created_at.strftime('%b %d, %Y') }}
+            </div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="empty-state" style="padding:2rem 0;">
+            <p>No registered users yet.</p>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

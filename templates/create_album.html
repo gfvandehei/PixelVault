@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}New Album — PixelVault{% endblock %}
+
+{% block head %}
+<style>
+  .form-wrap {
+    max-width: 560px;
+  }
+
+  .form-section {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.75rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .form-section h2 {
+    font-family: var(--font-serif);
+    font-size: 1.1rem;
+    font-weight: 400;
+    margin-bottom: 1.25rem;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.75rem;
+  }
+
+  .hint {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 0.3rem;
+    line-height: 1.5;
+  }
+
+  .form-actions {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>New Album</h1>
+  <p>Create a shared space for collecting photos and videos.</p>
+</div>
+
+<div class="form-wrap">
+  <form method="POST">
+    <div class="form-section">
+      <h2>Album Details</h2>
+      <div class="form-group">
+        <label for="name">Album Name</label>
+        <input type="text" id="name" name="name" placeholder="e.g. Jake's Birthday 2025"
+               maxlength="128" required autofocus>
+      </div>
+      <div class="form-group">
+        <label for="description">Description <span style="color:var(--text-muted);font-size:0.85em;">(optional)</span></label>
+        <textarea id="description" name="description" placeholder="A short description visible to uploaders..." maxlength="512"></textarea>
+      </div>
+    </div>
+
+    <div class="form-section">
+      <h2>Upload Permissions</h2>
+      <div class="form-group checkbox-group">
+        <input type="checkbox" id="allow_anonymous" name="allow_anonymous" checked>
+        <label for="allow_anonymous">Allow anyone with the link to upload (no account required)</label>
+      </div>
+      <p class="hint">When enabled, guests can upload by entering their name. When disabled, only logged-in users can upload.</p>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">Create Album →</button>
+      <a href="{{ url_for('dashboard') }}" class="btn btn-ghost">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

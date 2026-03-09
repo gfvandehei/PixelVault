@@ -1,0 +1,457 @@
+{% extends "base.html" %}
+{% block title %}{{ album.name }} — PixelVault{% endblock %}
+
+{% block head %}
+<style>
+  .album-header-meta {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 0.5rem;
+  }
+
+  .share-box {
+    background: var(--bg2);
+    border: 1px solid var(--amber-dim);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.75rem;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .share-box-label {
+    font-size: 0.78rem;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--amber);
+    white-space: nowrap;
+  }
+
+  .share-url {
+    flex: 1;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.45rem 0.75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+
+  .share-url:hover { border-color: var(--amber-dim); color: var(--text); }
+
+  /* ── Photos grid ── */
+  .photos-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .photos-toolbar h2 {
+    font-family: var(--font-serif);
+    font-weight: 300;
+    font-size: 1.2rem;
+    color: var(--text-dim);
+  }
+
+  .photos-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 0.75rem;
+  }
+
+  .photo-item {
+    position: relative;
+    aspect-ratio: 1;
+    overflow: hidden;
+    border-radius: var(--radius);
+    background: var(--bg3);
+    cursor: pointer;
+    group: true;
+  }
+
+  .photo-item img, .photo-item video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.25s;
+    display: block;
+  }
+
+  .photo-item:hover img, .photo-item:hover video { transform: scale(1.05); }
+
+  .photo-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 50%);
+    opacity: 0;
+    transition: opacity 0.2s;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 0.75rem;
+  }
+
+  .photo-item:hover .photo-overlay { opacity: 1; }
+
+  .photo-overlay-name {
+    font-size: 0.75rem;
+    color: rgba(255,255,255,0.9);
+    font-family: var(--font-mono);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .photo-overlay-meta {
+    font-size: 0.7rem;
+    color: rgba(255,255,255,0.55);
+    margin-top: 0.15rem;
+  }
+
+  .photo-delete {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    background: rgba(0,0,0,0.6);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    width: 26px;
+    height: 26px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .photo-item:hover .photo-delete { opacity: 1; }
+  .photo-delete:hover { background: var(--red); }
+
+  .video-badge {
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    background: rgba(0,0,0,0.65);
+    color: #fff;
+    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+  }
+
+  /* ── Lightbox ── */
+  .lightbox {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.93);
+    z-index: 500;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+  }
+
+  .lightbox.active { display: flex; }
+
+  .lightbox-media {
+    max-width: 90vw;
+    max-height: 80vh;
+    object-fit: contain;
+    border-radius: var(--radius);
+  }
+
+  .lightbox-info {
+    margin-top: 1rem;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    font-family: var(--font-mono);
+  }
+
+  .lightbox-close {
+    position: absolute;
+    top: 1.5rem;
+    right: 1.5rem;
+    background: rgba(255,255,255,0.1);
+    border: none;
+    color: #fff;
+    font-size: 1.25rem;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .lightbox-close:hover { background: rgba(255,255,255,0.2); }
+
+  .lightbox-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    background: rgba(255,255,255,0.08);
+    border: none;
+    color: #fff;
+    font-size: 1.5rem;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s;
+  }
+
+  .lightbox-nav:hover { background: rgba(255,255,255,0.18); }
+  .lightbox-prev { left: 1.5rem; }
+  .lightbox-next { right: 1.5rem; }
+
+  .lightbox-download {
+    position: absolute;
+    top: 1.5rem;
+    right: 5rem;
+    background: rgba(255,255,255,0.1);
+    border: none;
+    color: #fff;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: var(--radius);
+    cursor: pointer;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+
+  .lightbox-download:hover { background: rgba(255,255,255,0.2); }
+
+  /* ── Danger zone ── */
+  .danger-zone {
+    background: #120808;
+    border: 1px solid #4a1f1f;
+    border-radius: var(--radius);
+    padding: 1.25rem 1.5rem;
+    margin-top: 3rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .danger-zone-text h4 {
+    font-size: 0.9rem;
+    color: #e87070;
+    margin-bottom: 0.2rem;
+  }
+
+  .danger-zone-text p {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header page-header-actions">
+  <div>
+    <h1>{{ album.name }}</h1>
+    <div class="album-header-meta">
+      <span style="color:var(--text-dim); font-size:0.9rem;">{{ album.photo_count }} file{{ 's' if album.photo_count != 1 }}</span>
+      <span class="badge badge-dim">{{ album.created_at.strftime('%b %d, %Y') }}</span>
+      {% if album.allow_anonymous %}
+        <span class="badge badge-green">Public Upload</span>
+      {% else %}
+        <span class="badge badge-dim">Members Only</span>
+      {% endif %}
+    </div>
+    {% if album.description %}
+    <p style="color:var(--text-dim); margin-top:0.5rem; font-size:0.9rem;">{{ album.description }}</p>
+    {% endif %}
+  </div>
+  <a href="{{ url_for('dashboard') }}" class="btn btn-ghost">← Dashboard</a>
+</div>
+
+<!-- Share Link -->
+<div class="share-box">
+  <span class="share-box-label">🔗 Share Link</span>
+  <span class="share-url" onclick="copyLink()" title="Click to copy" id="shareUrl">{{ share_url }}</span>
+  <button class="btn btn-primary btn-sm" onclick="copyLink()">Copy</button>
+</div>
+
+<!-- Photos -->
+<div class="photos-toolbar">
+  <h2>{{ photos|length }} file{{ 's' if photos|length != 1 }} uploaded</h2>
+  {% if photos %}
+  <a href="{{ url_for('album_upload', token=album.token) }}" class="btn btn-ghost btn-sm" target="_blank">
+    Open Upload Page ↗
+  </a>
+  {% endif %}
+</div>
+
+{% if photos %}
+<div class="photos-grid" id="photosGrid">
+  {% for photo in photos %}
+  <div class="photo-item" onclick="openLightbox({{ loop.index0 }})" data-id="{{ photo.id }}">
+    {% if photo.is_video %}
+      <span class="video-badge">▶ VIDEO</span>
+      <video src="{{ url_for('serve_media', filename=photo.stored_filename) }}" muted playsinline
+             style="pointer-events:none;"></video>
+    {% else %}
+      <img src="{{ url_for('serve_media', filename='thumb_' + photo.stored_filename if photo.has_thumbnail else photo.stored_filename) }}"
+           alt="{{ photo.original_filename }}" loading="lazy">
+    {% endif %}
+    <div class="photo-overlay">
+      <div class="photo-overlay-name">{{ photo.original_filename }}</div>
+      <div class="photo-overlay-meta">{{ photo.uploader_name }} · {{ photo.uploaded_at.strftime('%b %d') }} · {{ photo.file_size_human }}</div>
+    </div>
+    <button class="photo-delete" onclick="deletePhoto(event, {{ photo.id }})" title="Delete">✕</button>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox">
+  <button class="lightbox-close" onclick="closeLightbox()">✕</button>
+  <a id="lbDownload" href="#" download class="lightbox-download">⬇ Download</a>
+  <button class="lightbox-nav lightbox-prev" onclick="navLightbox(-1)">‹</button>
+  <button class="lightbox-nav lightbox-next" onclick="navLightbox(1)">›</button>
+  <div id="lbMedia"></div>
+  <div class="lightbox-info" id="lbInfo"></div>
+</div>
+
+{% else %}
+<div class="empty-state">
+  <div class="icon">📭</div>
+  <h3>No uploads yet</h3>
+  <p>Share the link above to start collecting photos and videos.</p>
+  <a href="{{ url_for('album_upload', token=album.token) }}" class="btn btn-primary" target="_blank">
+    Open Upload Page ↗
+  </a>
+</div>
+{% endif %}
+
+<!-- Danger Zone -->
+<div class="danger-zone">
+  <div class="danger-zone-text">
+    <h4>Delete this album</h4>
+    <p>Permanently deletes the album and all uploaded files. This cannot be undone.</p>
+  </div>
+  <form method="POST" action="{{ url_for('delete_album', token=album.token) }}"
+        onsubmit="return confirm('Delete album and all files? This cannot be undone.')">
+    <button type="submit" class="btn btn-danger btn-sm">Delete Album</button>
+  </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const photos = [
+  {% for photo in photos %}
+  {
+    id: {{ photo.id }},
+    full: "{{ url_for('serve_media', filename=photo.stored_filename) }}",
+    thumb: "{{ url_for('serve_media', filename='thumb_' + photo.stored_filename if photo.has_thumbnail else photo.stored_filename) }}",
+    name: {{ photo.original_filename|tojson }},
+    uploader: {{ photo.uploader_name|tojson }},
+    date: {{ photo.uploaded_at.strftime('%b %d, %Y %H:%M')|tojson }},
+    size: {{ photo.file_size_human|tojson }},
+    isVideo: {{ 'true' if photo.is_video else 'false' }},
+  },
+  {% endfor %}
+];
+
+let currentIdx = 0;
+
+function openLightbox(idx) {
+  currentIdx = idx;
+  renderLightbox();
+  document.getElementById('lightbox').classList.add('active');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('active');
+  document.body.style.overflow = '';
+  document.getElementById('lbMedia').innerHTML = '';
+}
+
+function navLightbox(dir) {
+  currentIdx = (currentIdx + dir + photos.length) % photos.length;
+  renderLightbox();
+}
+
+function renderLightbox() {
+  const p = photos[currentIdx];
+  const lbMedia = document.getElementById('lbMedia');
+  const lbInfo = document.getElementById('lbInfo');
+  const lbDownload = document.getElementById('lbDownload');
+
+  if (p.isVideo) {
+    lbMedia.innerHTML = `<video src="${p.full}" controls class="lightbox-media" style="max-height:75vh;"></video>`;
+  } else {
+    lbMedia.innerHTML = `<img src="${p.full}" class="lightbox-media" alt="${p.name}" style="max-height:80vh;">`;
+  }
+
+  lbInfo.textContent = `${p.name} · ${p.uploader} · ${p.date} · ${p.size}`;
+  lbDownload.href = p.full;
+  lbDownload.download = p.name;
+}
+
+document.getElementById('lightbox').addEventListener('click', function(e) {
+  if (e.target === this) closeLightbox();
+});
+
+document.addEventListener('keydown', e => {
+  if (!document.getElementById('lightbox').classList.contains('active')) return;
+  if (e.key === 'Escape') closeLightbox();
+  if (e.key === 'ArrowLeft') navLightbox(-1);
+  if (e.key === 'ArrowRight') navLightbox(1);
+});
+
+async function deletePhoto(e, photoId) {
+  e.stopPropagation();
+  if (!confirm('Delete this file?')) return;
+  const res = await fetch(`/photo/${photoId}/delete`, { method: 'POST' });
+  if (res.ok) {
+    const el = document.querySelector(`[data-id="${photoId}"]`);
+    el.style.opacity = '0';
+    el.style.transform = 'scale(0.9)';
+    el.style.transition = 'all 0.2s';
+    setTimeout(() => el.remove(), 200);
+
+    // Update photo array
+    const idx = photos.findIndex(p => p.id === photoId);
+    if (idx > -1) photos.splice(idx, 1);
+  }
+}
+
+function copyLink() {
+  navigator.clipboard.writeText(document.getElementById('shareUrl').textContent.trim()).then(() => {
+    const el = document.querySelector('.share-box .btn-primary');
+    const orig = el.textContent;
+    el.textContent = 'Copied!';
+    setTimeout(() => el.textContent = orig, 2000);
+  });
+}
+</script>
+{% endblock %}

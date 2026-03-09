@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Error {{ code }} — PixelVault{% endblock %}
+{% block content %}
+<div class="empty-state" style="padding-top:5rem;">
+  <div style="font-family:var(--font-serif);font-size:5rem;font-weight:300;color:var(--border);line-height:1;margin-bottom:1rem;">{{ code }}</div>
+  <h3>{{ message }}</h3>
+  <p style="margin-top:0.5rem;">Something went wrong on our end.</p>
+  <a href="{{ url_for('index') }}" class="btn btn-ghost" style="margin-top:1.5rem;">← Go Home</a>
+</div>
+{% endblock %}

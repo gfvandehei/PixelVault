@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — PixelVault{% endblock %}
+
+{% block head %}
+<style>
+  .albums-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1.25rem;
+  }
+
+  .album-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    transition: border-color 0.2s, transform 0.15s;
+    position: relative;
+  }
+
+  .album-card:hover {
+    border-color: #3a3a44;
+    transform: translateY(-1px);
+  }
+
+  .album-thumb {
+    width: 100%;
+    aspect-ratio: 16/10;
+    background: var(--bg3);
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .album-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.3s;
+  }
+
+  .album-card:hover .album-thumb img { transform: scale(1.03); }
+
+  .album-thumb-placeholder {
+    color: var(--text-muted);
+    font-size: 2.5rem;
+    opacity: 0.3;
+  }
+
+  .album-info {
+    padding: 1rem 1.1rem 1.1rem;
+  }
+
+  .album-info h3 {
+    font-family: var(--font-serif);
+    font-size: 1.15rem;
+    font-weight: 400;
+    margin-bottom: 0.2rem;
+    color: var(--text);
+  }
+
+  .album-meta {
+    display: flex;
+    gap: 0.75rem;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    margin-top: 0.5rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .album-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.85rem;
+    align-items: center;
+  }
+
+  .album-actions a, .album-actions button {
+    font-size: 0.8rem;
+  }
+
+  .stats-row {
+    display: flex;
+    gap: 1.5rem;
+    padding: 1.25rem 1.5rem;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 2rem;
+  }
+
+  .stat { text-align: center; }
+  .stat-num {
+    font-family: var(--font-serif);
+    font-size: 1.8rem;
+    font-weight: 300;
+    color: var(--amber);
+    line-height: 1;
+  }
+  .stat-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    margin-top: 0.2rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header page-header-actions">
+  <div>
+    <h1>Your Albums</h1>
+    <p>Create albums, share links, and collect memories.</p>
+  </div>
+  <a href="{{ url_for('create_album') }}" class="btn btn-primary">+ New Album</a>
+</div>
+
+{% if albums %}
+<div class="stats-row">
+  <div class="stat">
+    <div class="stat-num">{{ albums|length }}</div>
+    <div class="stat-label">Albums</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num">{{ albums|sum(attribute='photo_count') }}</div>
+    <div class="stat-label">Total Files</div>
+  </div>
+</div>
+
+<div class="albums-grid">
+  {% for album in albums %}
+  <div class="album-card">
+    <a href="{{ url_for('album_view', token=album.token) }}" class="album-thumb">
+      {% if album.cover_photo %}
+        <img src="{{ url_for('serve_media', filename='thumb_' + album.cover_photo.stored_filename if album.cover_photo.has_thumbnail else album.cover_photo.stored_filename) }}"
+             alt="{{ album.name }}" loading="lazy">
+      {% else %}
+        <span class="album-thumb-placeholder">⬛</span>
+      {% endif %}
+    </a>
+    <div class="album-info">
+      <h3>{{ album.name }}</h3>
+      {% if album.description %}
+      <p style="font-size:0.85rem; color:var(--text-dim); margin-top:0.2rem; line-height:1.4;">
+        {{ album.description|truncate(80) }}
+      </p>
+      {% endif %}
+      <div class="album-meta">
+        <span>{{ album.photo_count }} file{{ 's' if album.photo_count != 1 }}</span>
+        <span>{{ album.created_at.strftime('%b %d, %Y') }}</span>
+        {% if album.allow_anonymous %}
+          <span class="badge badge-green">Public Upload</span>
+        {% else %}
+          <span class="badge badge-dim">Members Only</span>
+        {% endif %}
+      </div>
+      <div class="album-actions">
+        <a href="{{ url_for('album_view', token=album.token) }}" class="btn btn-ghost btn-sm">
+          View →
+        </a>
+        <button onclick="copyLink('{{ url_for('album_upload', token=album.token, _external=True) }}')"
+                class="btn btn-ghost btn-sm" title="Copy share link">
+          📋 Copy Link
+        </button>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="empty-state">
+  <div class="icon">📷</div>
+  <h3>No albums yet</h3>
+  <p>Create your first album and share it with friends to start collecting photos.</p>
+  <a href="{{ url_for('create_album') }}" class="btn btn-primary">Create Album</a>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+function copyLink(url) {
+  navigator.clipboard.writeText(url).then(() => {
+    const flash = document.createElement('div');
+    flash.className = 'flash success';
+    flash.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:300;max-width:320px;animation:slideIn .2s ease;';
+    flash.innerHTML = '<span>Share link copied to clipboard!</span>';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 3000);
+  });
+}
+</script>
+{% endblock %}

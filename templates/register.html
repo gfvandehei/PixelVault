@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}Sign Up — PixelVault{% endblock %}
+
+{% block head %}
+<style>
+  .auth-wrap {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 3rem;
+  }
+
+  .auth-card {
+    width: 100%;
+    max-width: 440px;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2.5rem;
+  }
+
+  .auth-logo {
+    font-family: var(--font-serif);
+    font-size: 2rem;
+    font-weight: 300;
+    margin-bottom: 0.25rem;
+  }
+
+  .auth-logo span { color: var(--amber); }
+
+  .auth-card h2 {
+    font-family: var(--font-serif);
+    font-size: 1.4rem;
+    font-weight: 300;
+    color: var(--text-dim);
+    margin-bottom: 2rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1rem;
+  }
+
+  .auth-footer {
+    margin-top: 1.5rem;
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  .auth-footer a { color: var(--amber); text-decoration: none; }
+  .auth-footer a:hover { text-decoration: underline; }
+
+  .btn-full { width: 100%; justify-content: center; }
+
+  .hint {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 0.3rem;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-logo">PixelVault<span>.</span></div>
+    <h2>Create your account</h2>
+
+    <form method="POST">
+      <div class="form-group">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" value="{{ username|default('') }}"
+               autocomplete="username" minlength="3" maxlength="64" required autofocus>
+      </div>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" value="{{ email|default('') }}"
+               autocomplete="email" required>
+      </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password"
+               autocomplete="new-password" minlength="8" required>
+        <p class="hint">At least 8 characters</p>
+      </div>
+      <div class="form-group">
+        <label for="confirm_password">Confirm Password</label>
+        <input type="password" id="confirm_password" name="confirm_password"
+               autocomplete="new-password" required>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full" style="margin-top:0.5rem;">
+        Create account →
+      </button>
+    </form>
+
+    <div class="auth-footer">
+      Already have an account? <a href="{{ url_for('login') }}">Log in</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
