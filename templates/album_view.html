@@ -291,11 +291,20 @@
   <a href="{{ url_for('dashboard') }}" class="btn btn-ghost">← Dashboard</a>
 </div>
 
-<!-- Share Link -->
-<div class="share-box">
-  <span class="share-box-label">🔗 Share Link</span>
-  <span class="share-url" onclick="copyLink()" title="Click to copy" id="shareUrl">{{ share_url }}</span>
-  <button class="btn btn-primary btn-sm" onclick="copyLink()">Copy</button>
+<!-- Share Links -->
+<div class="share-box" style="flex-direction:column;align-items:stretch;gap:0.6rem;">
+  <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+    <span class="share-box-label">Upload Link</span>
+    <span class="share-url" onclick="copyLink('{{ share_url }}')" title="Click to copy" style="flex:1;">{{ share_url }}</span>
+    <button class="btn btn-primary btn-sm" onclick="copyLink('{{ share_url }}')">Copy</button>
+  </div>
+  {% if view_share_url %}
+  <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+    <span class="share-box-label" style="color:var(--text-muted);">View&nbsp;Only</span>
+    <span class="share-url" onclick="copyLink('{{ view_share_url }}')" title="Click to copy" style="flex:1;">{{ view_share_url }}</span>
+    <button class="btn btn-ghost btn-sm" onclick="copyLink('{{ view_share_url }}')">Copy</button>
+  </div>
+  {% endif %}
 </div>
 
 <!-- Photos -->
@@ -456,18 +465,19 @@ async function deletePhoto(e, photoId) {
   }
 }
 
-function copyLink() {
-  const text = document.getElementById('shareUrl').textContent.trim();
-  const btn = document.querySelector('.share-box .btn-primary');
-  const orig = btn.textContent;
+function copyLink(url) {
   function onSuccess() {
-    btn.textContent = 'Copied!';
-    setTimeout(() => btn.textContent = orig, 2000);
+    const flash = document.createElement('div');
+    flash.className = 'flash success';
+    flash.style.cssText = 'position:fixed;bottom:1.5rem;right:1.5rem;z-index:300;max-width:320px;animation:slideIn .2s ease;';
+    flash.innerHTML = '<span>Link copied to clipboard!</span>';
+    document.body.appendChild(flash);
+    setTimeout(() => flash.remove(), 2000);
   }
   if (navigator.clipboard) {
-    navigator.clipboard.writeText(text).then(onSuccess).catch(() => fallbackCopy(text, onSuccess));
+    navigator.clipboard.writeText(url).then(onSuccess).catch(() => fallbackCopy(url, onSuccess));
   } else {
-    fallbackCopy(text, onSuccess);
+    fallbackCopy(url, onSuccess);
   }
 }
 

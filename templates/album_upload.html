@@ -522,9 +522,12 @@
 <div class="card">
   <div class="album-title">{{ album.name }}</div>
   <div class="album-desc">
-    {% if album.description %}{{ album.description }}{% else %}Upload your photos and videos to this shared album.{% endif %}
+    {% if album.description %}{{ album.description }}{% else %}
+      {% if album.allow_upload and not read_only %}Upload your photos and videos to this shared album.{% else %}Browse the photos and videos in this shared album.{% endif %}
+    {% endif %}
   </div>
 
+  {% if album.allow_upload and not read_only %}
   <!-- Drop Zone -->
   <div class="drop-zone" id="dropZone">
     <input type="file" id="fileInput" multiple
@@ -553,6 +556,11 @@
     <p>Your files have been added to the album.</p>
     <button class="btn-more" onclick="resetUploader()">Upload more</button>
   </div>
+  {% else %}
+  <div style="text-align:center;padding:1.5rem 0 0.5rem;color:var(--text-muted);font-size:0.85rem;font-family:var(--font-mono);">
+    View only — uploads are disabled for this album.
+  </div>
+  {% endif %}
 </div>
 
 <!-- Gallery -->
@@ -561,7 +569,7 @@
     <div class="gallery-title">Album Photos</div>
     <div style="display:flex;align-items:center;gap:1rem;">
       <div class="gallery-count" id="galleryCount"></div>
-      <a href="/share/{{ album.token }}/download" class="btn btn-ghost btn-sm" id="downloadAllBtn" style="display:none;">
+      <a href="{{ download_url }}" class="btn btn-ghost btn-sm" id="downloadAllBtn" style="display:none;">
         ⬇ Download All
       </a>
     </div>
@@ -584,9 +592,8 @@
 </div>
 
 <script>
-const TOKEN = {{ album.token|tojson }};
-const UPLOAD_URL = `/share/${TOKEN}/upload`;
-const MEDIA_BASE = `/share/${TOKEN}/media/`;
+const UPLOAD_URL = {{ upload_url|tojson }};
+const API_URL = {{ api_url|tojson }};
 
 let selectedFiles = [];
 
@@ -725,7 +732,7 @@ async function loadGallery() {
   const grid = document.getElementById('galleryGrid');
   const section = document.getElementById('gallerySection');
   try {
-    const res = await fetch(`/api/album/${TOKEN}/photos`);
+    const res = await fetch(API_URL);
     allPhotos = await res.json();
     if (!allPhotos.length) {
       section.style.display = '';

@@ -114,6 +114,8 @@ class Album(db.Model):
     owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     allow_anonymous = db.Column(db.Boolean, default=True)  # allow uploads without login
+    allow_upload = db.Column(db.Boolean, default=True)  # allow uploads via share link
+    view_token = db.Column(db.String(36), unique=True, nullable=True)  # separate read-only share token
     photos = db.relationship('Photo', backref='album', lazy=True, cascade='all, delete-orphan')
 
     @property
@@ -391,6 +393,7 @@ def create_album():
         name = request.form.get('name', '').strip()
         description = request.form.get('description', '').strip()
         allow_anonymous = request.form.get('allow_anonymous') == 'on'
+        allow_upload = request.form.get('allow_upload') == 'on'
 
         if not name:
             flash('Album name is required.', 'error')
@@ -400,7 +403,8 @@ def create_album():
             name=name,
             description=description,
             owner_id=current_user.id,
-            allow_anonymous=allow_anonymous
+            allow_anonymous=allow_anonymous,
+            allow_upload=allow_upload,
         )
         db.session.add(album)
         db.session.commit()
@@ -418,7 +422,9 @@ def album_view(token):
         abort(403)
     photos = Photo.query.filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
     share_url = url_for('album_upload', token=token, _external=True)
-    return render_template('album_view.html', album=album, photos=photos, share_url=share_url)
+    view_share_url = url_for('album_view_only', view_token=album.view_token, _external=True) if album.view_token else None
+    return render_template('album_view.html', album=album, photos=photos,
+                           share_url=share_url, view_share_url=view_share_url)
 
 
 @app.route('/album/<token>/delete', methods=['POST'])
@@ -513,9 +519,38 @@ def download_album_share(token):
 @app.route('/share/<token>', methods=['GET'])
 @login_required
 def album_upload(token):
-    """Shareable upload page — requires login."""
+    """Shareable upload page — upload-capable link."""
     album = Album.query.filter_by(token=token).first_or_404()
-    return render_template('album_upload.html', album=album)
+    return render_template('album_upload.html', album=album,
+        read_only=False,
+        api_url=url_for('api_album_photos', token=token),
+        upload_url=url_for('do_upload', token=token),
+        download_url=url_for('download_album_share', token=token))
+
+
+@app.route('/view/<view_token>', methods=['GET'])
+@login_required
+def album_view_only(view_token):
+    """Read-only share page."""
+    album = Album.query.filter_by(view_token=view_token).first_or_404()
+    return render_template('album_upload.html', album=album,
+        read_only=True,
+        api_url=url_for('api_album_view_photos', view_token=view_token),
+        upload_url=None,
+        download_url=url_for('download_album_view', view_token=view_token))
+
+
+@app.route('/album/<token>/settings', methods=['POST'])
+@login_required
+def album_settings(token):
+    """Update album settings (owner only)."""
+    album = Album.query.filter_by(token=token).first_or_404()
+    if album.owner_id != current_user.id:
+        abort(403)
+    album.allow_upload = request.form.get('allow_upload') == 'on'
+    db.session.commit()
+    flash('Album settings updated.', 'success')
+    return redirect(url_for('album_view', token=token))
 
 
 @app.route('/share/<token>/upload', methods=['POST'])
@@ -524,6 +559,9 @@ def album_upload(token):
 def do_upload(token):
     """Handle file upload from share page."""
     album = Album.query.filter_by(token=token).first_or_404()
+
+    if not album.allow_upload:
+        return jsonify({'error': 'Uploads are disabled for this album.'}), 403
 
     uploader_id = current_user.id
     uploader_name = current_user.username
@@ -609,6 +647,28 @@ def serve_share_media(token, filename):
     upload_dir = Path(app.config['UPLOAD_FOLDER']).resolve()
     return send_from_directory(str(upload_dir), filename)
 
+@app.route('/view/<view_token>/media/<path:filename>')
+@login_required
+def serve_view_media(view_token, filename):
+    """Serve media for view-only share page."""
+    if '/' in filename or '..' in filename:
+        abort(400)
+    album = Album.query.filter_by(view_token=view_token).first_or_404()
+    stored_name = filename.replace('thumb_', '', 1) if filename.startswith('thumb_') else filename
+    Photo.query.filter_by(stored_filename=stored_name, album_id=album.id).first_or_404()
+    upload_dir = Path(app.config['UPLOAD_FOLDER']).resolve()
+    return send_from_directory(str(upload_dir), filename)
+
+
+@app.route('/view/<view_token>/download')
+@login_required
+def download_album_view(view_token):
+    """Download all photos via view-only link."""
+    album = Album.query.filter_by(view_token=view_token).first_or_404()
+    buf = _build_album_zip(album)
+    zip_name = secure_filename(album.name or 'album') + '.zip'
+    return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+
 # ──────────────────────────────────────────────
 # API — Album photos (JSON, for gallery)
 # ──────────────────────────────────────────────
@@ -642,6 +702,28 @@ def api_album_photos(token):
             'is_video': p.is_video,
             'thumb_url': thumb_url,
             'full_url': full_url,
+        })
+    return jsonify(result)
+
+
+@app.route('/api/view/<view_token>/photos')
+@login_required
+def api_album_view_photos(view_token):
+    """Photo list for view-only share page."""
+    album = Album.query.filter_by(view_token=view_token).first_or_404()
+    photos = Photo.query.filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
+    result = []
+    for p in photos:
+        result.append({
+            'id': p.id,
+            'original_filename': p.original_filename,
+            'uploader_name': p.uploader_name,
+            'uploaded_at': p.uploaded_at.strftime('%b %d, %Y %H:%M'),
+            'file_size': p.file_size_human,
+            'is_video': p.is_video,
+            'thumb_url': url_for('serve_view_media', view_token=view_token,
+                                 filename=p.thumbnail_filename if p.has_thumbnail else p.stored_filename),
+            'full_url': url_for('serve_view_media', view_token=view_token, filename=p.stored_filename),
         })
     return jsonify(result)
 
@@ -722,6 +804,23 @@ def rate_limited(e):
 def create_app():
     with app.app_context():
         db.create_all()
+        # Migrate: add new columns if they don't exist yet
+        with db.engine.connect() as conn:
+            for stmt in [
+                "ALTER TABLE album ADD COLUMN allow_upload BOOLEAN NOT NULL DEFAULT 1",
+                "ALTER TABLE album ADD COLUMN view_token VARCHAR(36)",
+            ]:
+                try:
+                    conn.execute(db.text(stmt))
+                    conn.commit()
+                except Exception:
+                    pass  # Column already exists
+        # Generate view_tokens for any albums that don't have one
+        albums = Album.query.filter(Album.view_token == None).all()
+        for album in albums:
+            album.view_token = str(uuid.uuid4())
+        if albums:
+            db.session.commit()
     return app
 
 
