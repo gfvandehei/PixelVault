@@ -788,6 +788,12 @@ function renderLightbox() {
   lbInfo.textContent = `${p.original_filename} · ${p.uploader_name} · ${p.uploaded_at} · ${p.file_size}`;
   lbDownload.href = p.full_url;
   lbDownload.download = p.original_filename;
+
+  // Preload neighbours so arrow navigation feels instant
+  [-1, 1, 2].forEach(offset => {
+    const neighbour = allPhotos[(currentIdx + offset + allPhotos.length) % allPhotos.length];
+    if (!neighbour.is_video) new Image().src = neighbour.full_url;
+  });
 }
 
 document.getElementById('lightbox').addEventListener('click', function(e) {

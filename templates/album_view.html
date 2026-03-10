@@ -420,6 +420,12 @@ function renderLightbox() {
   lbInfo.textContent = `${p.name} · ${p.uploader} · ${p.date} · ${p.size}`;
   lbDownload.href = p.full;
   lbDownload.download = p.name;
+
+  // Preload neighbours so arrow navigation feels instant
+  [-1, 1, 2].forEach(offset => {
+    const neighbour = photos[(currentIdx + offset + photos.length) % photos.length];
+    if (!neighbour.isVideo) new Image().src = neighbour.full;
+  });
 }
 
 document.getElementById('lightbox').addEventListener('click', function(e) {
