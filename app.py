@@ -1,6 +1,8 @@
+import io
 import os
 import re
 import uuid
+import zipfile
 import mimetypes
 from datetime import datetime
 from functools import wraps
@@ -9,7 +11,7 @@ from urllib.parse import urlparse, urljoin
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
-    flash, session, send_from_directory, abort, jsonify, g
+    flash, session, send_from_directory, send_file, abort, jsonify, g
 )
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (
@@ -440,6 +442,51 @@ def _delete_photo_files(photo):
         fpath = upload_dir / fname
         if fpath.exists():
             fpath.unlink()
+
+
+def _build_album_zip(album):
+    """Return a BytesIO containing a ZIP of all photos in the album."""
+    buf = io.BytesIO()
+    upload_dir = Path(app.config['UPLOAD_FOLDER'])
+    seen = {}
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for photo in album.photos:
+            src = upload_dir / photo.stored_filename
+            if not src.exists():
+                continue
+            # Deduplicate original filenames inside the ZIP
+            name = photo.original_filename
+            if name in seen:
+                seen[name] += 1
+                stem, suffix = Path(name).stem, Path(name).suffix
+                name = f"{stem}_{seen[name]}{suffix}"
+            else:
+                seen[name] = 0
+            zf.write(str(src), name)
+    buf.seek(0)
+    return buf
+
+
+@app.route('/album/<token>/download')
+@login_required
+def download_album(token):
+    """Download all photos in an album as a ZIP (owner only)."""
+    album = Album.query.filter_by(token=token).first_or_404()
+    if album.owner_id != current_user.id:
+        abort(403)
+    buf = _build_album_zip(album)
+    zip_name = secure_filename(album.name or 'album') + '.zip'
+    return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+
+
+@app.route('/share/<token>/download')
+@login_required
+def download_album_share(token):
+    """Download all photos in a shared album as a ZIP (any logged-in user with the link)."""
+    album = Album.query.filter_by(token=token).first_or_404()
+    buf = _build_album_zip(album)
+    zip_name = secure_filename(album.name or 'album') + '.zip'
+    return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
 
 # ──────────────────────────────────────────────
 # Routes — Public Share / Upload

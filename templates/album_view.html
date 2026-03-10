@@ -302,9 +302,14 @@
 <div class="photos-toolbar">
   <h2>{{ photos|length }} file{{ 's' if photos|length != 1 }} uploaded</h2>
   {% if photos %}
-  <a href="{{ url_for('album_upload', token=album.token) }}" class="btn btn-ghost btn-sm" target="_blank">
-    Open Upload Page ↗
-  </a>
+  <div style="display:flex;gap:0.5rem;align-items:center;">
+    <a href="{{ url_for('download_album', token=album.token) }}" class="btn btn-ghost btn-sm">
+      ⬇ Download All
+    </a>
+    <a href="{{ url_for('album_upload', token=album.token) }}" class="btn btn-ghost btn-sm" target="_blank">
+      Open Upload Page ↗
+    </a>
+  </div>
   {% endif %}
 </div>
 

@@ -265,6 +265,18 @@
     .btn-primary:hover { background: #e8bc6a; }
     .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-dim);
+      border-color: var(--border);
+      width: auto;
+      padding: 0.45rem 0.9rem;
+    }
+
+    .btn-ghost:hover { border-color: #3a3a44; color: var(--text); background: var(--bg3); }
+
+    .btn-sm { padding: 0.35rem 0.8rem; font-size: 0.8rem; width: auto; }
+
     /* ── Uploads done ── */
     .success-banner {
       display: none;
@@ -547,7 +559,12 @@
 <div class="gallery-section" id="gallerySection" style="display:none;">
   <div class="gallery-header">
     <div class="gallery-title">Album Photos</div>
-    <div class="gallery-count" id="galleryCount"></div>
+    <div style="display:flex;align-items:center;gap:1rem;">
+      <div class="gallery-count" id="galleryCount"></div>
+      <a href="/share/{{ album.token }}/download" class="btn btn-ghost btn-sm" id="downloadAllBtn" style="display:none;">
+        ⬇ Download All
+      </a>
+    </div>
   </div>
   <div class="gallery-grid" id="galleryGrid"></div>
 </div>
@@ -718,6 +735,7 @@ async function loadGallery() {
     }
     section.style.display = '';
     document.getElementById('galleryCount').textContent = `${allPhotos.length} file${allPhotos.length !== 1 ? 's' : ''}`;
+    document.getElementById('downloadAllBtn').style.display = '';
     grid.innerHTML = allPhotos.map((p, i) => `
       <div class="gallery-item" onclick="openLightbox(${i})">
         ${p.is_video
