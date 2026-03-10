@@ -23,6 +23,11 @@ from flask_limiter.util import get_remote_address
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from PIL import Image
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass  # HEIC support unavailable if pillow-heif not installed
 import magic  # python-magic for MIME type verification
 
 # ──────────────────────────────────────────────
@@ -211,13 +216,26 @@ def validate_file(file_storage):
 
 
 def save_file(file_storage, mime_type):
-    """Save file with a UUID name and generate thumbnail if image."""
+    """Save file with a UUID name and generate thumbnail if image.
+    HEIC/HEIF files are converted to JPEG for browser compatibility."""
     ext = Path(file_storage.filename).suffix.lower()
+    is_heic = ext in ('.heic', '.heif') or mime_type in ('image/heic', 'image/heif')
+
+    # HEIC → JPEG: store as .jpg so browsers can display it
+    if is_heic:
+        ext = '.jpg'
+
     stored_name = f"{uuid.uuid4()}{ext}"
     upload_dir = Path(app.config['UPLOAD_FOLDER'])
     upload_dir.mkdir(parents=True, exist_ok=True)
     save_path = upload_dir / stored_name
-    file_storage.save(str(save_path))
+
+    if is_heic:
+        with Image.open(file_storage.stream) as img:
+            img = img.convert('RGB')
+            img.save(str(save_path), 'JPEG', quality=92)
+    else:
+        file_storage.save(str(save_path))
 
     file_size = save_path.stat().st_size
     has_thumbnail = False
