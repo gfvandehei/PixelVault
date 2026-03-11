@@ -1,17 +1,18 @@
 # PixelVault
 
-A self-hosted photo and video sharing platform. Create albums, share links, and let anyone upload to your server via a polished web interface.
+A self-hosted photo and video sharing platform. Create albums, share links, and let others upload or browse via a polished web interface.
 
 ## Features
 
-- **Account system** — Register/login with bcrypt-hashed passwords
+- **Account system** — Invite-only registration with bcrypt-hashed passwords
 - **Albums** — Create named albums with descriptions
-- **Shareable upload links** — Each album has a unique UUID link anyone can upload to
-- **Anonymous or members-only** — Choose whether guests need an account to upload
+- **Upload links** — Share a link that lets others upload to your album
+- **View-only links** — Share a separate read-only link for browsing without upload access
 - **Drag-and-drop upload** — Batched uploads with progress tracking
+- **HEIC support** — Apple HEIC photos are converted to JPEG automatically on upload
 - **Thumbnail generation** — Automatic JPEG thumbnails for photos
-- **Lightbox gallery** — Browse photos full-screen with keyboard navigation
-- **Download & delete** — Album owners can manage all files
+- **Lightbox gallery** — Browse photos full-screen with keyboard navigation and image preloading
+- **ZIP download** — Download all album photos as a ZIP file
 - **Security** — See Security section below
 
 ---
@@ -27,7 +28,7 @@ brew install libmagic
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt-get install libmagic1 libmagic-dev libjpeg-dev libpng-dev
+sudo apt-get install libmagic1 libmagic-dev libjpeg-dev libpng-dev libwebp-dev
 ```
 
 ### 2. Set up Python environment
@@ -114,14 +115,16 @@ Add to crontab:
 
 ## Environment Variables
 
-| Variable          | Default    | Description                                       |
-|-------------------|------------|---------------------------------------------------|
-| `SECRET_KEY`      | *required* | Flask secret key — use a long random string       |
-| `HTTPS`           | `false`    | Set `true` to enable Secure cookies and HSTS      |
-| `UPLOAD_FOLDER`   | `uploads`  | Directory where files are stored                  |
-| `MAX_UPLOAD_MB`   | `500`      | Max upload size in MB per request                 |
-| `FLASK_DEBUG`     | `false`    | Never set `true` in production                    |
-| `PORT`            | `5000`     | Port for the Flask/Gunicorn server                |
+| Variable          | Default    | Description                                        |
+|-------------------|------------|----------------------------------------------------|
+| `SECRET_KEY`      | *required* | Flask secret key — use a long random string        |
+| `HTTPS`           | `false`    | Set `true` to enable Secure cookies and HSTS       |
+| `UPLOAD_FOLDER`   | `uploads`  | Directory where uploaded files are stored          |
+| `MAX_UPLOAD_MB`   | `500`      | Max upload size in MB per request                  |
+| `FLASK_DEBUG`     | `false`    | Never set `true` in production                     |
+| `PORT`            | `5000`     | Port for the Flask/Gunicorn server                 |
+| `DATABASE_URL`    | *(SQLite)* | SQLAlchemy DB URI — defaults to `instance/pixelvault.db` |
+| `DATA_DIRECTORY`  | —          | If set, used to locate `pixelvault.db` when `DATABASE_URL` is not set |
 | `ADMIN_USERNAME`  | —          | Used by `flask create-admin` to set admin username |
 | `ADMIN_EMAIL`     | —          | Used by `flask create-admin` to set admin email    |
 | `ADMIN_PASSWORD`  | —          | Used by `flask create-admin` to set admin password |
@@ -160,31 +163,71 @@ PixelVault is designed with internet exposure in mind:
 
 ```
 pixelvault/
-├── app.py                 # Main Flask application
+├── app.py                    # Entry point — calls create_app(), used by Gunicorn
+├── migrate_heic.py           # One-time script to convert stored HEIC files to JPEG
 ├── requirements.txt
 ├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
 ├── nginx.conf
+├── pixelvault/               # Application package
+│   ├── __init__.py           # create_app() factory, DB migrations, error handlers, CLI
+│   ├── config.py             # Allowed file types, validation constants
+│   ├── extensions.py         # db, login_manager, limiter instances
+│   ├── models.py             # User, AllowedEmail, Album, Photo models
+│   ├── utils.py              # File handling, ZIP building, admin_required decorator
+│   └── routes/
+│       ├── auth.py           # Register, login, logout
+│       ├── albums.py         # Dashboard, create/view/delete album, download
+│       ├── share.py          # Upload link, view-only link, file upload handler
+│       ├── media.py          # Authenticated media serving
+│       ├── api.py            # JSON photo list endpoints for gallery JS
+│       └── admin.py          # Admin panel — allowed emails and user list
 ├── templates/
-│   ├── base.html          # Base layout + nav
+│   ├── base.html             # Base layout + nav
 │   ├── login.html
 │   ├── register.html
-│   ├── dashboard.html     # Album list
+│   ├── dashboard.html        # Album list (owned + contributed)
 │   ├── create_album.html
-│   ├── album_view.html    # Owner's gallery view
-│   ├── album_upload.html  # Public share page
-│   ├── admin.html         # Admin panel (allowed emails + users)
+│   ├── album_view.html       # Owner's gallery view with share links
+│   ├── album_upload.html     # Share page (upload or view-only depending on link)
+│   ├── admin.html            # Admin panel
 │   └── error.html
-├── uploads/               # Created at runtime
-└── instance/              # SQLite database (created at runtime)
+├── uploads/                  # Created at runtime
+└── instance/                 # SQLite database (created at runtime)
 ```
+
+---
+
+## Share Links
+
+Each album has two shareable links, both visible in the album owner's view:
+
+| Link type | URL pattern | What recipients can do |
+|-----------|-------------|------------------------|
+| **Upload link** | `/share/<token>` | Browse the gallery and upload files |
+| **View-only link** | `/view/<view_token>` | Browse the gallery only — upload UI is hidden and the upload endpoint refuses requests |
+
+The owner can also toggle a master **Allow uploads** switch on the album, which disables the upload link for everyone regardless of which link they use.
+
+---
+
+## HEIC Migration
+
+If you have existing HEIC files stored before HEIC-to-JPEG conversion was added, run the migration script once:
+
+```bash
+python migrate_heic.py --dry-run   # preview changes
+python migrate_heic.py             # convert and update database
+```
+
+The script converts stored `.heic` files to JPEG, regenerates thumbnails, updates the database, and removes the original HEIC files. The filenames shown to users are preserved.
 
 ---
 
 ## Supported File Types
 
-**Photos:** JPEG, PNG, GIF, WebP, HEIC  
+**Photos:** JPEG, PNG, GIF, WebP, HEIC (converted to JPEG on upload)
 **Videos:** MP4, MOV, AVI, WebM, MPG/MPEG
 
 ---

@@ -35,9 +35,12 @@ except ImportError:
 
 from PIL import Image
 
-# Import app and db from the Flask app
+# Import app and db from the package
 sys.path.insert(0, str(Path(__file__).parent))
-from app import app, db, Photo
+from pixelvault import create_app
+from pixelvault.extensions import db
+from pixelvault.models import Photo
+app = create_app()
 
 HEIC_EXTS = {'.heic', '.heif'}
 HEIC_MIMES = {'image/heic', 'image/heif'}

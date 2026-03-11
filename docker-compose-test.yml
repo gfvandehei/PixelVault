@@ -1,0 +1,17 @@
+version: '3.9'
+
+services:
+  app-test:
+    build: .
+    restart: unless-stopped
+    container_name: pixelvault_test
+    environment:
+      - SECRET_KEY=8254aa6280e2b43715d249df50fcf23d0475f84bdad4172aafe0f233c5e4e2fd
+      - HTTPS=false
+      - UPLOAD_FOLDER=/app/uploads
+      - DATA_DIRECTORY=/app/instance
+      - MAX_UPLOAD_MB=500
+      - FLASK_DEBUG=true
+      - PORT=5050
+    ports:
+      - 5050:5050
