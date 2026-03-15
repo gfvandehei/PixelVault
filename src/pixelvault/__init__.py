@@ -5,25 +5,24 @@ from pathlib import Path
 from flask import Flask, render_template
 
 from .extensions import db, login_manager, limiter
+from .config import *
 
 
 def create_app():
     app = Flask(
         __name__,
-        template_folder=str(Path(__file__).parent.parent / 'templates'),
+        template_folder=str(Path(__file__).parents[2]/ 'templates'),
     )
-
+    print(SQLALCHEMY_DATABASE_URI)
     # ── Configuration ──────────────────────────────────────────────────────
-    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(32).hex())
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-        'DATABASE_URL', 'sqlite:///pixelvault.db'
-    )
+    app.config['SECRET_KEY'] = SECRET_KEY
+    app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', 'uploads')
-    app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_UPLOAD_MB', 500)) * 1024 * 1024
+    app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+    app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
     app.config['SESSION_COOKIE_HTTPONLY'] = True
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-    app.config['SESSION_COOKIE_SECURE'] = os.environ.get('HTTPS', 'false').lower() == 'true'
+    app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
 
     # ── Extensions ─────────────────────────────────────────────────────────
@@ -44,7 +43,7 @@ def create_app():
         response.headers['X-XSS-Protection'] = '1; mode=block'
         response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
         response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
-        if os.environ.get('HTTPS', 'false').lower() == 'true':
+        if SESSION_COOKIE_SECURE:
             response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
         return response
 
@@ -72,9 +71,9 @@ def create_app():
         import click
         from .models import User
 
-        username = os.environ.get('ADMIN_USERNAME', '').strip()
-        email = os.environ.get('ADMIN_EMAIL', '').strip().lower()
-        password = os.environ.get('ADMIN_PASSWORD', '').strip()
+        username = ADMIN_USERNAME
+        email = ADMIN_EMAIL
+        password = ADMIN_PASSWORD
 
         if not username or not email or not password:
             click.echo('Set ADMIN_USERNAME, ADMIN_EMAIL, and ADMIN_PASSWORD environment variables.')

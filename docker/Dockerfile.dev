@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 # System deps for python-magic and Pillow
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,10 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements.txt .
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .
-COPY . .
-ENV PYTHONPATH=./src
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Create upload directory
 RUN mkdir -p uploads instance && chmod 755 uploads instance
@@ -24,6 +21,7 @@ RUN mkdir -p uploads instance && chmod 755 uploads instance
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-EXPOSE 5000
+ENV TERM=xterm-256color
+ENV PORT=5050
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:create_app()"]
+CMD "gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 app:create_app()"

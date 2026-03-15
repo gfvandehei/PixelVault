@@ -1,7 +1,7 @@
 import os
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(dotenv_path=os.getenv("ENV_FILE", None))
 
 from pixelvault import create_app
 

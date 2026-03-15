@@ -2,8 +2,10 @@ version: '3.9'
 
 services:
   app-test:
-    build: .
-    restart: unless-stopped
+    image: pixelvault_test:latest
+    build: 
+      context: ..
+      dockerfile: ./docker/Dockerfile.dev
     container_name: pixelvault_test
     environment:
       - SECRET_KEY=8254aa6280e2b43715d249df50fcf23d0475f84bdad4172aafe0f233c5e4e2fd
@@ -13,5 +15,8 @@ services:
       - MAX_UPLOAD_MB=500
       - FLASK_DEBUG=true
       - PORT=5050
+    volumes:
+      - ../pixelvault:/app/pixelvault
+      - ../app.py:/app/app.py
     ports:
       - 5050:5050
