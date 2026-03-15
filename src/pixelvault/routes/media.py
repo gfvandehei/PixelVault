@@ -15,7 +15,9 @@ def register(app):
             abort(400)
 
         stored_name = filename.replace('thumb_', '', 1) if filename.startswith('thumb_') else filename
-        photo = Photo.query.filter_by(stored_filename=stored_name).first_or_404()
+        photo = db.session.query(Photo).filter_by(stored_filename=stored_name).one_or_none()
+        if photo is None:
+            abort(404)
         album = db.session.get(Album, photo.album_id)
 
         if current_user.is_authenticated and (
@@ -34,9 +36,13 @@ def register(app):
     def serve_share_media(token, filename):
         if '/' in filename or '..' in filename:
             abort(400)
-        album = Album.query.filter_by(token=token).first_or_404()
+        album = db.session.query(Album).filter_by(token=token).one_or_none()
+        if album is None:
+            abort(404)
         stored_name = filename.replace('thumb_', '', 1) if filename.startswith('thumb_') else filename
-        Photo.query.filter_by(stored_filename=stored_name, album_id=album.id).first_or_404()
+        photo = db.session.query(Photo).filter_by(stored_filename=stored_name, album_id=album.id).one_or_none()
+        if photo is None:
+            abort(404)
         session['album_access_token'] = token
         upload_dir = Path(app.config['UPLOAD_FOLDER']).resolve()
         return send_from_directory(str(upload_dir), filename)
@@ -46,8 +52,12 @@ def register(app):
     def serve_view_media(view_token, filename):
         if '/' in filename or '..' in filename:
             abort(400)
-        album = Album.query.filter_by(view_token=view_token).first_or_404()
+        album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
+        if album is None:
+            abort(404)
         stored_name = filename.replace('thumb_', '', 1) if filename.startswith('thumb_') else filename
-        Photo.query.filter_by(stored_filename=stored_name, album_id=album.id).first_or_404()
+        photo = db.session.query(Photo).filter_by(stored_filename=stored_name, album_id=album.id).one_or_none()
+        if photo is None:
+            abort(404)
         upload_dir = Path(app.config['UPLOAD_FOLDER']).resolve()
         return send_from_directory(str(upload_dir), filename)

@@ -12,7 +12,9 @@ def register(app):
     @app.route('/share/<token>', methods=['GET'])
     @login_required
     def album_upload(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        album = db.session.query(Album).filter_by(token=token).one_or_none()
+        if album is None:
+            abort(404)
         return render_template('album_upload.html', album=album,
             read_only=False,
             api_url=url_for('api_album_photos', token=token),
@@ -22,7 +24,9 @@ def register(app):
     @app.route('/view/<view_token>', methods=['GET'])
     @login_required
     def album_view_only(view_token):
-        album = Album.query.filter_by(view_token=view_token).first_or_404()
+        album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
+        if album is None:
+            abort(404)
         return render_template('album_upload.html', album=album,
             read_only=True,
             api_url=url_for('api_album_view_photos', view_token=view_token),
@@ -33,7 +37,9 @@ def register(app):
     @login_required
     @limiter.limit("60 per hour")
     def do_upload(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        album = db.session.query(Album).filter_by(token=token).one_or_none()
+        if album is None:
+            abort(404)
 
         if not album.allow_upload:
             return jsonify({'error': 'Uploads are disabled for this album.'}), 403
@@ -77,7 +83,9 @@ def register(app):
     @app.route('/share/<token>/download')
     @login_required
     def download_album_share(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        album = db.session.query(Album).filter_by(token=token).one_or_none()
+        if album is None:
+            abort(404)
         buf = build_album_zip(album)
         zip_name = secure_filename(album.name or 'album') + '.zip'
         return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
@@ -85,7 +93,9 @@ def register(app):
     @app.route('/view/<view_token>/download')
     @login_required
     def download_album_view(view_token):
-        album = Album.query.filter_by(view_token=view_token).first_or_404()
+        album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
+        if album is None:
+            abort(404)
         buf = build_album_zip(album)
         zip_name = secure_filename(album.name or 'album') + '.zip'
         return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)

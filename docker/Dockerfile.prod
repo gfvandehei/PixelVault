@@ -14,7 +14,9 @@ WORKDIR /app
 COPY requirements.txt .
 COPY pyproject.toml .
 RUN pip install --no-cache-dir .
-COPY . .
+COPY ./src/pixelvault ./src/pixelvault
+COPY ./templates ./templates
+COPY ./app.py ./app.py
 ENV PYTHONPATH=./src
 
 # Create upload directory

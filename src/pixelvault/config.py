@@ -1,5 +1,8 @@
 import re
 import os
+import pathlib
+
+DEFAULT_ROOT = pathlib.Path(__file__).parents[2].absolute()
 
 ALLOWED_PHOTO_TYPES = {'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/heic'}
 ALLOWED_VIDEO_TYPES = {'video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm', 'video/mpeg'}
@@ -22,3 +25,4 @@ SESSION_COOKIE_SECURE = os.environ.get('HTTPS', 'false').lower() == 'true'
 ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', '').strip()
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip().lower()
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '').strip()
+TEMPLATES_FOLDER = pathlib.Path(os.environ.get("FLASK_TEMPLATES_FOLDER", DEFAULT_ROOT/"templates"))

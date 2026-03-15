@@ -6,6 +6,7 @@ from ..extensions import db, limiter
 from ..models import Album, Photo
 from ..utils import delete_photo_files, build_album_zip
 from flask import send_file
+from sqlalchemy.exc import NoResultFound
 
 
 def register(app):
@@ -13,12 +14,12 @@ def register(app):
     @app.route('/dashboard')
     @login_required
     def dashboard():
-        albums = Album.query.filter_by(owner_id=current_user.id).order_by(Album.created_at.desc()).all()
+        albums = db.session.query(Album).filter_by(owner_id=current_user.id).order_by(Album.created_at.desc()).all()
 
         contributed_ids = db.session.query(Photo.album_id).filter(
             Photo.uploader_id == current_user.id
         ).distinct().subquery()
-        contributed = Album.query.filter(
+        contributed = db.session.query(Album).filter(
             Album.id.in_(contributed_ids),
             Album.owner_id != current_user.id
         ).order_by(Album.created_at.desc()).all()
@@ -56,10 +57,13 @@ def register(app):
     @app.route('/album/<token>')
     @login_required
     def album_view(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        try:
+            album = db.session.query(Album).filter_by(token=token).one()
+        except NoResultFound:
+            abort(404)
         if album.owner_id != current_user.id:
             abort(403)
-        photos = Photo.query.filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
+        photos = db.session.query(Photo).filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
         share_url = url_for('album_upload', token=token, _external=True)
         view_share_url = url_for('album_view_only', view_token=album.view_token, _external=True) if album.view_token else None
         return render_template('album_view.html', album=album, photos=photos,
@@ -68,7 +72,10 @@ def register(app):
     @app.route('/album/<token>/delete', methods=['POST'])
     @login_required
     def delete_album(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        try:
+            album = db.session.query(Album).filter_by(token=token).one()
+        except NoResultFound:
+            abort(404)
         if album.owner_id != current_user.id:
             abort(403)
         for photo in album.photos:
@@ -95,7 +102,10 @@ def register(app):
     @app.route('/album/<token>/download')
     @login_required
     def download_album(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        try:
+            album = db.session.query(Album).filter_by(token=token).one()
+        except NoResultFound:
+            abort(404)
         if album.owner_id != current_user.id:
             abort(403)
         buf = build_album_zip(album)
@@ -105,7 +115,10 @@ def register(app):
     @app.route('/album/<token>/settings', methods=['POST'])
     @login_required
     def album_settings(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        try:
+            album = db.session.query(Album).filter_by(token=token).one()
+        except NoResultFound:
+            abort(404)
         if album.owner_id != current_user.id:
             abort(403)
         album.allow_upload = request.form.get('allow_upload') == 'on'

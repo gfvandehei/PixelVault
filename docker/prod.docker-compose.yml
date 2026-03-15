@@ -2,17 +2,23 @@ version: '3.9'
 
 services:
   app:
-    build: .
+    image: pixelvault:latest
+    build: 
+      context: ..
+      dockerfile: ./docker/Dockerfile.prod
     restart: unless-stopped
     environment:
       - SECRET_KEY=${SECRET_KEY}
       - HTTPS=${HTTPS:-false}
       - UPLOAD_FOLDER=/app/uploads
+      - DATABASE_URL=sqlite:////app/instance/pixelvault.db
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-500}
       - FLASK_DEBUG=false
     volumes:
-      - uploads:/app/uploads
-      - db:/app/instance
+      - ${UPLOAD_FOLDER:?UPLOAD_FOLDER not set}:/app/uploads
+      - ${DATABASE_PATH:?DATABASE_PATH not set}:/app/instance
+    ports:
+      - 5000:5000
     expose:
       - "5000"
     networks:
@@ -27,15 +33,13 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/etc/nginx/certs:ro           # Put your SSL certs here
-      - uploads:/app/uploads:ro
+      - ${UPLOAD_FOLDER:?UPLOAD_FOLDER not set}:/app/uploads:ro
     depends_on:
       - app
     networks:
       - internal
-
-volumes:
-  uploads:
-  db:
+    profiles:
+      - nginx
 
 networks:
   internal:

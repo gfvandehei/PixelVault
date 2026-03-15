@@ -12,8 +12,8 @@ def register(app):
     @login_required
     @admin_required
     def admin_panel():
-        allowed_emails = AllowedEmail.query.order_by(AllowedEmail.added_at.desc()).all()
-        users = User.query.order_by(User.created_at.desc()).all()
+        allowed_emails = db.session.query(AllowedEmail).order_by(AllowedEmail.added_at.desc()).all()
+        users = db.session.query(User).order_by(User.created_at.desc()).all()
         return render_template('admin.html', allowed_emails=allowed_emails, users=users)
 
     @app.route('/admin/email/add', methods=['POST'])
@@ -28,7 +28,7 @@ def register(app):
             flash('Please enter a valid email address.', 'error')
             return redirect(url_for('admin_panel'))
 
-        if AllowedEmail.query.filter_by(email=email).first():
+        if db.session.query(AllowedEmail).filter_by(email=email).first():
             flash(f'{email} is already on the allowed list.', 'info')
             return redirect(url_for('admin_panel'))
 

@@ -2,19 +2,21 @@ from flask import jsonify, abort, session, url_for
 from flask_login import login_required, current_user
 
 from ..models import Album, Photo
-
+from ..extensions import db, limiter
 
 def register(app):
 
     @app.route('/api/album/<token>/photos')
     def api_album_photos(token):
-        album = Album.query.filter_by(token=token).first_or_404()
+        album = db.session.query(Album).filter_by(token=token).one_or_none()
+        if album is None:
+            abort(404)
 
         if not current_user.is_authenticated or album.owner_id != current_user.id:
             if session.get('album_access_token') != token and not current_user.is_authenticated:
                 abort(403)
 
-        photos = Photo.query.filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
+        photos = db.session.query(Photo).filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
         result = []
         for p in photos:
             if current_user.is_authenticated and album.owner_id == current_user.id:
@@ -39,8 +41,10 @@ def register(app):
     @app.route('/api/view/<view_token>/photos')
     @login_required
     def api_album_view_photos(view_token):
-        album = Album.query.filter_by(view_token=view_token).first_or_404()
-        photos = Photo.query.filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
+        album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
+        if album is None:
+            abort(404)
+        photos = db.session.query(Photo).filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
         result = []
         for p in photos:
             result.append({

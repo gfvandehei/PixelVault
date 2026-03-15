@@ -15,8 +15,15 @@ services:
       - MAX_UPLOAD_MB=500
       - FLASK_DEBUG=true
       - PORT=5050
+      - FLASK_TEMPLATES_FOLDER=/app/templates
+      - ADMIN_EMAIL=admin@test.com
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=password
     volumes:
-      - ../pixelvault:/app/pixelvault
+      - ../src/pixelvault:/app/pixelvault
+      - ../templates:/app/templates
       - ../app.py:/app/app.py
+      - ./instance:/app/instance
+      - ./uploads:/app/uploads
     ports:
       - 5050:5050

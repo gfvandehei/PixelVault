@@ -45,11 +45,11 @@ def register(app):
             if password != confirm:
                 errors.append("Passwords do not match.")
             if not errors:
-                if User.query.filter_by(username=username).first():
+                if db.session.query(User).filter_by(username=username).first():
                     errors.append("Username already taken.")
-                if User.query.filter_by(email=email).first():
+                if db.session.query(User).filter_by(email=email).first():
                     errors.append("Email already registered.")
-                if not AllowedEmail.query.filter_by(email=email).first():
+                if not db.session.query(AllowedEmail).filter_by(email=email).first():
                     errors.append("This email address has not been authorized to register.")
 
             if errors:
@@ -82,7 +82,7 @@ def register(app):
                 flash('Invalid username or password.', 'error')
                 return render_template('login.html', username=username)
 
-            user = User.query.filter_by(username=username).first()
+            user = db.session.query(User).filter_by(username=username).first()
             if not user or not user.check_password(password):
                 flash('Invalid username or password.', 'error')
                 return render_template('login.html', username=username)

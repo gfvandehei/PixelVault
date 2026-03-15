@@ -123,3 +123,24 @@ def build_album_zip(album):
             zf.write(str(src), name)
     buf.seek(0)
     return buf
+
+def create_admin(username, email, password, session, print=print):
+    """Create the admin user from ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD env vars."""
+    from .models import User
+
+    if not username or not email or not password:
+        print('Set ADMIN_USERNAME, ADMIN_EMAIL, and ADMIN_PASSWORD environment variables.')
+        return
+
+    if session.query(User).filter_by(is_admin=True).first():
+        print('An admin user already exists.')
+        return
+    if session.query(User).filter_by(email=email).first():
+        print(f'A user with email {email} already exists.')
+        return
+
+    admin = User(username=username, email=email, is_admin=True)
+    admin.set_password(password)
+    session.add(admin)
+    session.commit()
+    print(f'Admin user "{username}" created successfully.')

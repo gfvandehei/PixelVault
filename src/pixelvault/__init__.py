@@ -3,17 +3,20 @@ import uuid
 from pathlib import Path
 
 from flask import Flask, render_template
+import sys
 
 from .extensions import db, login_manager, limiter
 from .config import *
+import pixelvault.utils as utils
+import logging
 
 
 def create_app():
     app = Flask(
         __name__,
-        template_folder=str(Path(__file__).parents[2]/ 'templates'),
+        template_folder=str(TEMPLATES_FOLDER.absolute()),
     )
-    print(SQLALCHEMY_DATABASE_URI)
+    print(TEMPLATES_FOLDER, file=sys.stderr)
     # ── Configuration ──────────────────────────────────────────────────────
     app.config['SECRET_KEY'] = SECRET_KEY
     app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
@@ -70,31 +73,15 @@ def create_app():
         """Create the admin user from ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD env vars."""
         import click
         from .models import User
-
-        username = ADMIN_USERNAME
-        email = ADMIN_EMAIL
-        password = ADMIN_PASSWORD
-
-        if not username or not email or not password:
-            click.echo('Set ADMIN_USERNAME, ADMIN_EMAIL, and ADMIN_PASSWORD environment variables.')
-            return
-
-        if User.query.filter_by(is_admin=True).first():
-            click.echo('An admin user already exists.')
-            return
-        if User.query.filter_by(email=email).first():
-            click.echo(f'A user with email {email} already exists.')
-            return
-
-        admin = User(username=username, email=email, is_admin=True)
-        admin.set_password(password)
-        db.session.add(admin)
-        db.session.commit()
-        click.echo(f'Admin user "{username}" created successfully.')
+        utils.create_admin(ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD, db.session, click.echo)
 
     # ── Database init & migrations ─────────────────────────────────────────
     with app.app_context():
         db.create_all()
+        if ADMIN_EMAIL:
+            print("ADMIN email was set creating admin")
+            utils.create_admin(ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD, db.session, logging.info)
+            print("FINISHED CREATING ADMIN")
         _run_migrations()
 
     return app
@@ -114,8 +101,7 @@ def _run_migrations():
                 conn.commit()
             except Exception:
                 pass  # Column already exists
-
-    albums = Album.query.filter(Album.view_token == None).all()
+    albums = db.session.query(Album).filter(Album.view_token == None).all()
     for album in albums:
         album.view_token = str(uuid.uuid4())
     if albums:

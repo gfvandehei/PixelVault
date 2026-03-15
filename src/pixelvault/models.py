@@ -13,10 +13,9 @@ from sqlalchemy.orm import (
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, ForeignKey
 )
-from .extensions import db, login_manager
 from .config import ALLOWED_PHOTO_TYPES, ALLOWED_VIDEO_TYPES
 
-class Base(DeclarativeBase, MappedAsDataclass):
+class Base(DeclarativeBase):
     pass
 
 class User(UserMixin, Base):
@@ -43,6 +42,7 @@ class AllowedEmail(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class Album(Base):
+    __tablename__ = "album"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey('user.id'), nullable=False)
