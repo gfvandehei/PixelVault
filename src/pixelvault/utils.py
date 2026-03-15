@@ -8,7 +8,7 @@ from urllib.parse import urlparse, urljoin
 import magic
 from flask import request, abort, current_app
 from flask_login import current_user
-from PIL import Image
+from PIL import Image, ImageOps
 
 try:
     from pillow_heif import register_heif_opener
@@ -64,6 +64,7 @@ def save_file(file_storage, mime_type):
 
     if is_heic:
         with Image.open(file_storage.stream) as img:
+            img = ImageOps.exif_transpose(img)
             img = img.convert('RGB')
             img.save(str(save_path), 'JPEG', quality=92)
     else:
@@ -76,6 +77,7 @@ def save_file(file_storage, mime_type):
         try:
             thumb_path = upload_dir / f"thumb_{stored_name}"
             with Image.open(str(save_path)) as img:
+                img = ImageOps.exif_transpose(img)
                 img = img.convert('RGB')
                 img.thumbnail((400, 400), Image.LANCZOS)
                 img.save(str(thumb_path), 'JPEG', quality=85)
@@ -131,6 +133,7 @@ def create_admin(username, email, password, session, print=print):
     if not username or not email or not password:
         print('Set ADMIN_USERNAME, ADMIN_EMAIL, and ADMIN_PASSWORD environment variables.')
         return
+    print(session.query(User).all())
 
     if session.query(User).filter_by(is_admin=True).first():
         print('An admin user already exists.')
