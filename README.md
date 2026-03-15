@@ -50,8 +50,14 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 ### 4. Create the admin account
 
-Registration is invite-only — only emails the admin has authorized can sign up. You must create the admin account first:
+Registration is invite-only — only emails the admin has authorized can sign up. You must create the admin account first.
 
+**Option A — standalone script (recommended):**
+```bash
+python scripts/create_admin.py --env .env --user yourname --email you@example.com --password yourpassword
+```
+
+**Option B — Flask CLI:**
 ```bash
 export ADMIN_USERNAME=yourname
 export ADMIN_EMAIL=you@example.com
@@ -88,20 +94,24 @@ cp /etc/letsencrypt/live/your-domain.com/fullchain.pem certs/
 cp /etc/letsencrypt/live/your-domain.com/privkey.pem certs/
 ```
 
-### 3. Configure .env
+### 3. Configure .env.prod
 
 ```bash
-cp .env.example .env
-# Set:
+cp .env.prod .env.prod   # already provided — edit values
+# Required:
 #   SECRET_KEY=<long random string>
+#   UPLOAD_FOLDER=<absolute path for uploads>
+#   DATABASE_PATH=<absolute path for the directory containing pixelvault.db>
 #   HTTPS=true
 #   MAX_UPLOAD_MB=500
 ```
 
+`DATABASE_URL` is set automatically in the compose file to `sqlite:////app/instance/pixelvault.db` (note the four slashes — required for an absolute path in SQLite URIs).
+
 ### 4. Deploy
 
 ```bash
-docker compose up -d
+docker compose -f ./docker/prod.docker-compose.yml --env-file .env.prod up -d --build
 ```
 
 ### 5. Auto-renew certificates
@@ -119,15 +129,15 @@ Add to crontab:
 |-------------------|------------|----------------------------------------------------|
 | `SECRET_KEY`      | *required* | Flask secret key — use a long random string        |
 | `HTTPS`           | `false`    | Set `true` to enable Secure cookies and HSTS       |
-| `UPLOAD_FOLDER`   | `uploads`  | Directory where uploaded files are stored          |
+| `UPLOAD_FOLDER`   | `uploads`  | Absolute path where uploaded files are stored; mounted as a volume in Docker |
+| `DATABASE_PATH`   | —          | Absolute path to the directory containing `pixelvault.db`; mounted as a volume in Docker |
+| `DATABASE_URL`    | `sqlite:///pixelvault.db` | SQLAlchemy DB URI. Use four slashes for absolute paths: `sqlite:////abs/path/db` |
 | `MAX_UPLOAD_MB`   | `500`      | Max upload size in MB per request                  |
 | `FLASK_DEBUG`     | `false`    | Never set `true` in production                     |
 | `PORT`            | `5000`     | Port for the Flask/Gunicorn server                 |
-| `DATABASE_URL`    | *(SQLite)* | SQLAlchemy DB URI — defaults to `instance/pixelvault.db` |
-| `DATA_DIRECTORY`  | —          | If set, used to locate `pixelvault.db` when `DATABASE_URL` is not set |
-| `ADMIN_USERNAME`  | —          | Used by `flask create-admin` to set admin username |
-| `ADMIN_EMAIL`     | —          | Used by `flask create-admin` to set admin email    |
-| `ADMIN_PASSWORD`  | —          | Used by `flask create-admin` to set admin password |
+| `ADMIN_USERNAME`  | —          | Used by `flask create-admin` and `scripts/create_admin.py` |
+| `ADMIN_EMAIL`     | —          | Used by `flask create-admin` and `scripts/create_admin.py` |
+| `ADMIN_PASSWORD`  | —          | Used by `flask create-admin` and `scripts/create_admin.py` |
 
 ---
 
@@ -166,15 +176,18 @@ pixelvault/
 ├── app.py                    # Entry point — calls create_app(), used by Gunicorn
 ├── migrate_heic.py           # One-time script to convert stored HEIC files to JPEG
 ├── requirements.txt
-├── .env.example
-├── Dockerfile
-├── docker-compose.yml
-├── nginx.conf
-├── pixelvault/               # Application package
+├── .env.prod                 # Production environment template
+├── scripts/
+│   └── create_admin.py       # Standalone admin creation script (no Flask CLI needed)
+├── docker/
+│   ├── Dockerfile.prod       # Production Docker image
+│   ├── Dockerfile.dev        # Development Docker image
+│   └── prod.docker-compose.yml
+├── src/pixelvault/           # Application package
 │   ├── __init__.py           # create_app() factory, DB migrations, error handlers, CLI
-│   ├── config.py             # Allowed file types, validation constants
+│   ├── config.py             # Env-var config, allowed file types, validation constants
 │   ├── extensions.py         # db, login_manager, limiter instances
-│   ├── models.py             # User, AllowedEmail, Album, Photo models
+│   ├── models.py             # User, AllowedEmail, Album, Photo (vanilla SQLAlchemy)
 │   ├── utils.py              # File handling, ZIP building, admin_required decorator
 │   └── routes/
 │       ├── auth.py           # Register, login, logout
