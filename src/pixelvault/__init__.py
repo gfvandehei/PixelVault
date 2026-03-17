@@ -17,6 +17,7 @@ def create_app():
         template_folder=str(TEMPLATES_FOLDER.absolute()),
     )
     print(TEMPLATES_FOLDER, file=sys.stderr)
+    print(SQLALCHEMY_DATABASE_URI, file=sys.stderr)
     # ── Configuration ──────────────────────────────────────────────────────
     app.config['SECRET_KEY'] = SECRET_KEY
     app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
@@ -32,7 +33,6 @@ def create_app():
     db.init_app(app)
     login_manager.init_app(app)
     limiter.init_app(app)
-
     # ── Routes ─────────────────────────────────────────────────────────────
     # Import after extensions are bound so decorators resolve correctly
     from .routes import register_all
@@ -80,7 +80,7 @@ def create_app():
         db.create_all()
         if ADMIN_EMAIL:
             print("ADMIN email was set creating admin")
-            utils.create_admin(ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD, db.session, logging.info)
+            utils.create_admin(ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD, db.session, app.logger.info)
             print("FINISHED CREATING ADMIN")
         _run_migrations()
 

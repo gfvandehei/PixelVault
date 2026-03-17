@@ -12,6 +12,7 @@ services:
       - HTTPS=false
       - UPLOAD_FOLDER=/app/uploads
       - DATA_DIRECTORY=/app/instance
+      - DATABASE_URL=sqlite:////app/instance/pixelvault.db
       - MAX_UPLOAD_MB=500
       - FLASK_DEBUG=true
       - PORT=5050
@@ -20,10 +21,10 @@ services:
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=password
     volumes:
-      - ../src/pixelvault:/app/pixelvault
-      - ../templates:/app/templates
-      - ../app.py:/app/app.py
-      - ./instance:/app/instance
-      - ./uploads:/app/uploads
+      - ${PIXELVAULT_ROOT:?set the root}/src/pixelvault:/app/pixelvault
+      - ${PIXELVAULT_ROOT:?set the root}/templates:/app/templates
+      - ${PIXELVAULT_ROOT:?set the root}/app.py:/app/app.py
+      - ${DATA_DIRECTORY:?set the data directory}:/app/instance
+      - ${UPLOAD_FOLDER:?set the upload directory}:/app/uploads
     ports:
       - 5050:5050
