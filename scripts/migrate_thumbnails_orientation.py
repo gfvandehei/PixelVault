@@ -81,7 +81,7 @@ def main():
     from pixelvault.models import Photo, Base
     from pixelvault.config import ALLOWED_PHOTO_TYPES
     import pixelvault.config as config
-    #(config.SQLALCHEMY_DATABASE_URI)
+    print(config.SQLALCHEMY_DATABASE_URI)
     engine = create_engine(config.SQLALCHEMY_DATABASE_URI)
     upload_dir = Path(config.UPLOAD_FOLDER).resolve()
 
@@ -89,10 +89,11 @@ def main():
         sys.exit(f"ERROR: Upload folder not found: {upload_dir}")
 
     with Session(engine) as session:
-        #print(Base.metadata.tables.keys())
+        print(Base.metadata.tables.keys())
+        
         Base.metadata.create_all(engine)
         photos = session.query(Photo).all()
-        #print(photos)
+        print(photos)
         photos = session.query(Photo).filter(
             Photo.has_thumbnail == True,
             Photo.mime_type.in_(ALLOWED_PHOTO_TYPES),
