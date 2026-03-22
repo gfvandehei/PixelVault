@@ -9,6 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    img, video { max-width: 100%; height: auto; }
 
     :root {
       --bg:         #0d0d0f;
@@ -347,8 +348,16 @@
     /* ── Responsive ── */
     @media (max-width: 640px) {
       nav { padding: 0 1rem; }
+      .nav-links { gap: 0.1rem; }
+      .nav-links a { padding: 0.4rem 0.5rem; font-size: 0.8rem; }
+      .nav-user { display: none; }
       .page-header-actions { flex-direction: column; }
       .page-header h1 { font-size: 1.7rem; }
+      .flashes { right: 1rem; left: 1rem; max-width: none; }
+    }
+
+    @media (max-width: 480px) {
+      .nav-links .btn-primary { padding: 0.4rem 0.6rem; }
     }
   </style>
   {% block head %}{% endblock %}
