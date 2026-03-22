@@ -1,10 +1,17 @@
 from pathlib import Path
 
-from flask import abort, session, send_from_directory
+from flask import abort, session, send_from_directory, make_response
 from flask_login import login_required, current_user
 
 from ..extensions import db
 from ..models import Album, Photo
+
+_CACHE_HEADERS = 'private, max-age=31536000, immutable'
+
+
+def _cached(response):
+    response.headers['Cache-Control'] = _CACHE_HEADERS
+    return response
 
 
 def register(app):
@@ -30,7 +37,7 @@ def register(app):
                 abort(403)
 
         upload_dir = Path(app.config['UPLOAD_FOLDER']).resolve()
-        return send_from_directory(str(upload_dir), filename)
+        return _cached(make_response(send_from_directory(str(upload_dir), filename)))
 
     @app.route('/share/<token>/media/<path:filename>')
     def serve_share_media(token, filename):
@@ -45,7 +52,7 @@ def register(app):
             abort(404)
         session['album_access_token'] = token
         upload_dir = Path(app.config['UPLOAD_FOLDER']).resolve()
-        return send_from_directory(str(upload_dir), filename)
+        return _cached(make_response(send_from_directory(str(upload_dir), filename)))
 
     @app.route('/view/<view_token>/media/<path:filename>')
     @login_required
@@ -60,4 +67,4 @@ def register(app):
         if photo is None:
             abort(404)
         upload_dir = Path(app.config['UPLOAD_FOLDER']).resolve()
-        return send_from_directory(str(upload_dir), filename)
+        return _cached(make_response(send_from_directory(str(upload_dir), filename)))

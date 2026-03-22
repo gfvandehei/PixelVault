@@ -727,6 +727,15 @@ function resetUploader() {
 // ── Gallery & Lightbox ──
 let allPhotos = [];
 let currentIdx = 0;
+const imageCache = new Map();
+
+function preloadImage(url) {
+  if (imageCache.has(url)) return imageCache.get(url);
+  const img = new Image();
+  img.src = url;
+  imageCache.set(url, img);
+  return img;
+}
 
 async function loadGallery() {
   const grid = document.getElementById('galleryGrid');
@@ -786,10 +795,21 @@ function renderLightbox() {
   const lbInfo = document.getElementById('lbInfo');
   const lbDownload = document.getElementById('lbDownload');
 
+  lbMedia.innerHTML = '';
+
   if (p.is_video) {
-    lbMedia.innerHTML = `<video src="${p.full_url}" controls class="lightbox-media" style="max-height:75vh;"></video>`;
+    const video = document.createElement('video');
+    video.src = p.full_url;
+    video.controls = true;
+    video.className = 'lightbox-media';
+    video.style.maxHeight = '75vh';
+    lbMedia.appendChild(video);
   } else {
-    lbMedia.innerHTML = `<img src="${p.full_url}" class="lightbox-media" alt="${escHtml(p.original_filename)}" style="max-height:80vh;">`;
+    const img = preloadImage(p.full_url);
+    img.className = 'lightbox-media';
+    img.alt = escHtml(p.original_filename);
+    img.style.maxHeight = '80vh';
+    lbMedia.appendChild(img);
   }
 
   lbInfo.textContent = `${p.original_filename} · ${p.uploader_name} · ${p.uploaded_at} · ${p.file_size}`;
@@ -797,9 +817,9 @@ function renderLightbox() {
   lbDownload.download = p.original_filename;
 
   // Preload neighbours so arrow navigation feels instant
-  [-1, 1, 2].forEach(offset => {
+  [-2, -1, 1, 2].forEach(offset => {
     const neighbour = allPhotos[(currentIdx + offset + allPhotos.length) % allPhotos.length];
-    if (!neighbour.is_video) new Image().src = neighbour.full_url;
+    if (!neighbour.is_video) preloadImage(neighbour.full_url);
   });
 }
 

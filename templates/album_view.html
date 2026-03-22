@@ -395,6 +395,15 @@ const photos = [
 ];
 
 let currentIdx = 0;
+const imageCache = new Map();
+
+function preloadImage(url) {
+  if (imageCache.has(url)) return imageCache.get(url);
+  const img = new Image();
+  img.src = url;
+  imageCache.set(url, img);
+  return img;
+}
 
 function openLightbox(idx) {
   currentIdx = idx;
@@ -420,10 +429,21 @@ function renderLightbox() {
   const lbInfo = document.getElementById('lbInfo');
   const lbDownload = document.getElementById('lbDownload');
 
+  lbMedia.innerHTML = '';
+
   if (p.isVideo) {
-    lbMedia.innerHTML = `<video src="${p.full}" controls class="lightbox-media" style="max-height:75vh;"></video>`;
+    const video = document.createElement('video');
+    video.src = p.full;
+    video.controls = true;
+    video.className = 'lightbox-media';
+    video.style.maxHeight = '75vh';
+    lbMedia.appendChild(video);
   } else {
-    lbMedia.innerHTML = `<img src="${p.full}" class="lightbox-media" alt="${p.name}" style="max-height:80vh;">`;
+    const img = preloadImage(p.full);
+    img.className = 'lightbox-media';
+    img.alt = p.name;
+    img.style.maxHeight = '80vh';
+    lbMedia.appendChild(img);
   }
 
   lbInfo.textContent = `${p.name} · ${p.uploader} · ${p.date} · ${p.size}`;
@@ -431,9 +451,9 @@ function renderLightbox() {
   lbDownload.download = p.name;
 
   // Preload neighbours so arrow navigation feels instant
-  [-1, 1, 2].forEach(offset => {
+  [-2, -1, 1, 2].forEach(offset => {
     const neighbour = photos[(currentIdx + offset + photos.length) % photos.length];
-    if (!neighbour.isVideo) new Image().src = neighbour.full;
+    if (!neighbour.isVideo) preloadImage(neighbour.full);
   });
 }
 
