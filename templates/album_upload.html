@@ -9,6 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    img, video { max-width: 100%; height: auto; }
 
     :root {
       --bg:         #0d0d0f;
@@ -513,6 +514,43 @@
 
     .footer-note a { color: var(--text-muted); text-decoration: none; }
     .footer-note a:hover { color: var(--amber); }
+
+    /* ── Mobile ── */
+    @media (max-width: 640px) {
+      body { padding: 1.5rem 0.75rem 3rem; }
+
+      .card { padding: 1.5rem 1.25rem; }
+
+      .gallery-section { margin-top: 1.5rem; }
+
+      .gallery-grid {
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      }
+
+      .lightbox-download {
+        top: auto;
+        bottom: 5rem;
+        right: 1.5rem;
+        font-size: 0.8rem;
+        padding: 0.35rem 0.65rem;
+      }
+
+      .lightbox-info {
+        font-size: 0.75rem;
+        padding: 0 1rem;
+        word-break: break-word;
+        text-align: center;
+      }
+
+      .lightbox-nav {
+        width: 38px;
+        height: 38px;
+        font-size: 1.25rem;
+      }
+
+      .lightbox-prev { left: 0.5rem; }
+      .lightbox-next { right: 0.5rem; }
+    }
   </style>
 </head>
 <body>
