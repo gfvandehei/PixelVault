@@ -12,6 +12,7 @@ def register(app):
     @app.route('/share/<token>', methods=['GET'])
     @login_required
     def album_upload(token):
+        """Render the shared upload page for an album, allowing guests to browse and upload files."""
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
             abort(404)
@@ -24,6 +25,7 @@ def register(app):
     @app.route('/view/<view_token>', methods=['GET'])
     @login_required
     def album_view_only(view_token):
+        """Render the view-only shared page for an album. Guests can browse photos but cannot upload."""
         album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
         if album is None:
             abort(404)
@@ -37,6 +39,14 @@ def register(app):
     @login_required
     @limiter.limit("60 per hour")
     def do_upload(token):
+        """
+        Accept a batch of files uploaded via the share link and save them to the album.
+
+        Validates each file by extension and MIME type, converts HEIC images to JPEG,
+        generates thumbnails, and records each file in the database. Returns a JSON
+        array of per-file results indicating success or a descriptive error.
+        Rejects the entire request if uploads are disabled on the album.
+        """
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
             abort(404)
@@ -83,6 +93,7 @@ def register(app):
     @app.route('/share/<token>/download')
     @login_required
     def download_album_share(token):
+        """Stream a ZIP of all album photos to a user accessing the album via its upload share link."""
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
             abort(404)
@@ -93,6 +104,7 @@ def register(app):
     @app.route('/view/<view_token>/download')
     @login_required
     def download_album_view(view_token):
+        """Stream a ZIP of all album photos to a user accessing the album via its view-only share link."""
         album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
         if album is None:
             abort(404)

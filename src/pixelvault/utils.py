@@ -20,6 +20,7 @@ from .config import ALLOWED_PHOTO_TYPES, ALLOWED_MIME_TYPES, ALLOWED_EXTENSIONS
 
 
 def admin_required(f):
+    """Decorator that restricts a route to admin users, returning 403 for everyone else."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not current_user.is_authenticated or not current_user.is_admin:
@@ -98,6 +99,7 @@ def is_safe_redirect(target):
 
 
 def delete_photo_files(photo):
+    """Delete the stored file and its thumbnail from disk, silently skipping any that don't exist."""
     upload_dir = Path(current_app.config['UPLOAD_FOLDER'])
     for fname in [photo.stored_filename, f"thumb_{photo.stored_filename}"]:
         fpath = upload_dir / fname

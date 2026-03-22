@@ -14,6 +14,12 @@ def register(app):
     @app.route('/dashboard')
     @login_required
     def dashboard():
+        """
+        Render the user's dashboard.
+
+        Shows albums the current user owns, plus any albums they have contributed
+        uploads to (but don't own).
+        """
         albums = db.session.query(Album).filter_by(owner_id=current_user.id).order_by(Album.created_at.desc()).all()
 
         contributed_ids = db.session.query(Photo.album_id).filter(
@@ -30,6 +36,12 @@ def register(app):
     @login_required
     @limiter.limit("30 per hour")
     def create_album():
+        """
+        Handle album creation.
+
+        GET  — render the creation form.
+        POST — create a new album owned by the current user and redirect to its view page.
+        """
         if request.method == 'POST':
             name = request.form.get('name', '').strip()
             description = request.form.get('description', '').strip()
@@ -57,6 +69,7 @@ def register(app):
     @app.route('/album/<token>')
     @login_required
     def album_view(token):
+        """Render the owner's full album view with share links, photo grid, and settings. Returns 403 if the current user is not the album owner."""
         try:
             album = db.session.query(Album).filter_by(token=token).one()
         except NoResultFound:
@@ -72,6 +85,7 @@ def register(app):
     @app.route('/album/<token>/delete', methods=['POST'])
     @login_required
     def delete_album(token):
+        """Permanently delete an album and all of its uploaded files from disk and the database."""
         try:
             album = db.session.query(Album).filter_by(token=token).one()
         except NoResultFound:
@@ -88,6 +102,7 @@ def register(app):
     @app.route('/photo/<int:photo_id>/delete', methods=['POST'])
     @login_required
     def delete_photo(photo_id):
+        """Delete a single photo from disk and the database. Only the album owner may delete photos. Returns JSON."""
         photo = db.session.get(Photo, photo_id)
         if not photo:
             abort(404)
@@ -102,6 +117,7 @@ def register(app):
     @app.route('/album/<token>/download')
     @login_required
     def download_album(token):
+        """Stream a ZIP archive of all photos in the album to the owner as a file download."""
         try:
             album = db.session.query(Album).filter_by(token=token).one()
         except NoResultFound:
@@ -115,6 +131,7 @@ def register(app):
     @app.route('/album/<token>/settings', methods=['POST'])
     @login_required
     def album_settings(token):
+        """Update album settings (currently the allow_upload toggle) and redirect back to the album view."""
         try:
             album = db.session.query(Album).filter_by(token=token).one()
         except NoResultFound:

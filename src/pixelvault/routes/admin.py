@@ -12,6 +12,7 @@ def register(app):
     @login_required
     @admin_required
     def admin_panel():
+        """Render the admin dashboard showing all allowed emails and registered users."""
         allowed_emails = db.session.query(AllowedEmail).order_by(AllowedEmail.added_at.desc()).all()
         users = db.session.query(User).order_by(User.created_at.desc()).all()
         return render_template('admin.html', allowed_emails=allowed_emails, users=users)
@@ -21,6 +22,7 @@ def register(app):
     @admin_required
     @limiter.limit("60 per hour")
     def admin_add_email():
+        """Add an email address to the registration whitelist so the user can create an account."""
         email = request.form.get('email', '').strip().lower()
         note = request.form.get('note', '').strip()
 
@@ -42,6 +44,7 @@ def register(app):
     @login_required
     @admin_required
     def admin_remove_email(entry_id):
+        """Remove an email address from the registration whitelist by its database ID."""
         entry = db.session.get(AllowedEmail, entry_id)
         if not entry:
             abort(404)

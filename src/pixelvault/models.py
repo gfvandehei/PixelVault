@@ -29,9 +29,11 @@ class User(UserMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     def set_password(self, password):
+        """Hash and store the user's password using PBKDF2-SHA256 with 600,000 rounds."""
         self.password_hash = generate_password_hash(password, method='pbkdf2:sha256:600000')
 
     def check_password(self, password):
+        """Return True if the given plaintext password matches the stored hash."""
         return check_password_hash(self.password_hash, password)
 
 class AllowedEmail(Base):
@@ -56,10 +58,12 @@ class Album(Base):
 
     @property
     def photo_count(self):
+        """Return the total number of files (photos and videos) in the album."""
         return len(self.photos)
 
     @property
     def cover_photo(self):
+        """Return the first photo in the album for use as a cover thumbnail, or None if there are no photos."""
         photos = [p for p in self.photos if p.is_photo]
         return photos[0] if photos else None
 
@@ -79,18 +83,22 @@ class Photo(Base):
 
     @property
     def is_photo(self):
+        """Return True if this file is an image (not a video)."""
         return self.mime_type in ALLOWED_PHOTO_TYPES
 
     @property
     def is_video(self):
+        """Return True if this file is a video."""
         return self.mime_type in ALLOWED_VIDEO_TYPES
 
     @property
     def thumbnail_filename(self):
+        """Return the expected filename for this photo's thumbnail on disk."""
         return f"thumb_{self.stored_filename}"
 
     @property
     def file_size_human(self):
+        """Return the file size as a human-readable string (e.g. '3.2 MB')."""
         size = self.file_size
         for unit in ['B', 'KB', 'MB', 'GB']:
             if size < 1024:

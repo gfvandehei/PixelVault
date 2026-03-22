@@ -11,6 +11,7 @@ def register(app):
 
     @app.route('/')
     def index():
+        """Redirect authenticated users to the dashboard, everyone else to the login page."""
         if current_user.is_authenticated:
             return redirect(url_for('dashboard'))
         return redirect(url_for('login'))
@@ -18,6 +19,13 @@ def register(app):
     @app.route('/register', methods=['GET', 'POST'])
     @limiter.limit("10 per hour")
     def register():
+        """
+        Handle new user registration.
+
+        GET  — render the registration form.
+        POST — validate the submitted username, email, and password, then create the account.
+               Registration is invite-only: the email must already exist in AllowedEmail.
+        """
         if current_user.is_authenticated:
             return redirect(url_for('dashboard'))
 
@@ -70,6 +78,13 @@ def register(app):
     @app.route('/login', methods=['GET', 'POST'])
     @limiter.limit("20 per hour")
     def login():
+        """
+        Handle user login.
+
+        GET  — render the login form.
+        POST — verify credentials and start a session. Redirects to the 'next' query-param URL
+               if present and safe, otherwise to the dashboard.
+        """
         if current_user.is_authenticated:
             return redirect(url_for('dashboard'))
 
@@ -96,6 +111,7 @@ def register(app):
     @app.route('/logout')
     @login_required
     def logout():
+        """Clear the current user's session and redirect to the login page."""
         logout_user()
         flash('You have been logged out.', 'info')
         return redirect(url_for('login'))
