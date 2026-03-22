@@ -8,6 +8,13 @@ def register(app):
 
     @app.route('/api/album/<token>/photos')
     def api_album_photos(token):
+        """
+        Return a JSON array of photo metadata for an album accessed via its upload share token.
+
+        Accessible to the album owner (authenticated) or anyone whose session holds a
+        matching album_access_token. Media URLs are scoped to the appropriate serve endpoint
+        based on whether the requester is the owner or a share-link visitor.
+        """
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
             abort(404)
@@ -41,6 +48,7 @@ def register(app):
     @app.route('/api/view/<view_token>/photos')
     @login_required
     def api_album_view_photos(view_token):
+        """Return a JSON array of photo metadata for an album accessed via its view-only share token."""
         album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
         if album is None:
             abort(404)
