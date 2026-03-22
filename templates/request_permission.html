@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Access Required — PixelVault{% endblock %}
+
+{% block content %}
+<div class="empty-state" style="padding: 6rem 2rem;">
+  <div class="icon">🔒</div>
+  <h3>Access Required</h3>
+  <p>You need to be signed in to view this album.</p>
+  <a href="{{ url_for('login', next=request.url) }}" class="btn btn-primary">Sign in to continue</a>
+</div>
+{% endblock %}

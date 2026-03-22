@@ -107,12 +107,20 @@ def _run_migrations():
         for stmt in [
             "ALTER TABLE album ADD COLUMN allow_upload BOOLEAN NOT NULL DEFAULT 1",
             "ALTER TABLE album ADD COLUMN view_token VARCHAR(36)",
+            """CREATE TABLE IF NOT EXISTS album_access (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES user(id),
+                album_id INTEGER NOT NULL REFERENCES album(id),
+                accessed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, album_id)
+            )""",
+            "ALTER TABLE album_access ADD COLUMN access_type VARCHAR(10) NOT NULL DEFAULT 'upload'",
         ]:
             try:
                 conn.execute(db.text(stmt))
                 conn.commit()
             except Exception:
-                pass  # Column already exists
+                pass  # Column/table already exists
     albums = db.session.query(Album).filter(Album.view_token == None).all()
     for album in albums:
         album.view_token = str(uuid.uuid4())

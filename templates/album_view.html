@@ -60,6 +60,52 @@
 
   .share-url:hover { border-color: var(--amber-dim); color: var(--text); }
 
+  .access-table-wrap {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 1.75rem;
+    overflow: hidden;
+  }
+
+  .access-table-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.82rem;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+  }
+
+  .access-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .access-table tr + tr {
+    border-top: 1px solid var(--border);
+  }
+
+  .access-table td {
+    padding: 0.6rem 1.25rem;
+    vertical-align: middle;
+  }
+
+  .access-username {
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    color: var(--text);
+    width: 40%;
+  }
+
+  .access-actions {
+    text-align: right;
+  }
+
   /* ── Photos grid ── */
   .photos-toolbar {
     display: flex;
@@ -528,6 +574,7 @@
   <a href="{{ url_for('dashboard') }}" class="btn btn-ghost">← Dashboard</a>
 </div>
 
+{% if is_owner %}
 <!-- Share Links -->
 <div class="share-box">
   <div class="share-row">
@@ -544,16 +591,52 @@
   {% endif %}
 </div>
 
+{% if accesses %}
+<!-- Access List -->
+<div class="access-table-wrap">
+  <div class="access-table-header">
+    <span>People with access</span>
+    <span style="color:var(--text-muted); font-size:0.78rem; font-family:var(--font-mono);">{{ accesses|length }} member{{ 's' if accesses|length != 1 }}</span>
+  </div>
+  <table class="access-table">
+    <tbody>
+    {% for a in accesses %}
+    <tr>
+      <td class="access-username">{{ a.user.username }}</td>
+      <td>
+        <span class="badge {{ 'badge-green' if a.access_type == 'upload' else 'badge-dim' }}">
+          {{ 'Upload' if a.access_type == 'upload' else 'View only' }}
+        </span>
+      </td>
+      <td class="access-actions">
+        {% if a.access_type == 'upload' %}
+        <form method="post" action="{{ url_for('set_album_access', token=album.token, user_id=a.user_id) }}">
+          <input type="hidden" name="access_type" value="view">
+          <button type="submit" class="btn btn-ghost btn-sm">Set view only</button>
+        </form>
+        {% else %}
+        <form method="post" action="{{ url_for('set_album_access', token=album.token, user_id=a.user_id) }}">
+          <input type="hidden" name="access_type" value="upload">
+          <button type="submit" class="btn btn-ghost btn-sm">Set upload</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endif %}
+
 <!-- Photos -->
 <div class="photos-toolbar">
   <h2>{{ photos|length }} file{{ 's' if photos|length != 1 }} uploaded</h2>
   <div style="display:flex;gap:0.5rem;align-items:center;">
     {% if photos %}
-    <a href="{{ url_for('download_album', token=album.token) }}" class="btn btn-ghost btn-sm">
-      ⬇ Download All
-    </a>
+    <a href="{{ download_url }}" class="btn btn-ghost btn-sm">⬇ Download All</a>
     {% endif %}
-    {% if album.allow_upload %}
+    {% if can_upload %}
     <button class="btn btn-primary btn-sm" onclick="openUploadModal()">↑ Upload Files</button>
     {% endif %}
   </div>
@@ -575,10 +658,21 @@
       <div class="photo-overlay-name">{{ photo.original_filename }}</div>
       <div class="photo-overlay-meta">{{ photo.uploader_name }} · {{ photo.uploaded_at.strftime('%b %d') }} · {{ photo.file_size_human }}</div>
     </div>
-    <button class="photo-delete" onclick="deletePhoto(event, {{ photo.id }})" title="Delete">✕</button>
+    {% if is_owner %}<button class="photo-delete" onclick="deletePhoto(event, {{ photo.id }})" title="Delete">✕</button>{% endif %}
   </div>
   {% endfor %}
 </div>
+
+{% else %}
+<div class="empty-state">
+  <div class="icon">📭</div>
+  <h3>No uploads yet</h3>
+  <p>Share the link above to start collecting photos and videos.</p>
+  {% if can_upload %}
+  <button class="btn btn-primary" onclick="openUploadModal()">↑ Upload Files</button>
+  {% endif %}
+</div>
+{% endif %}
 
 <!-- Lightbox -->
 <div class="lightbox" id="lightbox">
@@ -590,19 +684,8 @@
   <div class="lightbox-info" id="lbInfo"></div>
 </div>
 
-{% else %}
-<div class="empty-state">
-  <div class="icon">📭</div>
-  <h3>No uploads yet</h3>
-  <p>Share the link above to start collecting photos and videos.</p>
-  {% if album.allow_upload %}
-  <button class="btn btn-primary" onclick="openUploadModal()">↑ Upload Files</button>
-  {% endif %}
-</div>
-{% endif %}
-
 <!-- Upload Modal -->
-{% if album.allow_upload %}
+{% if can_upload %}
 <div class="modal-backdrop" id="uploadModal">
   <div class="modal">
     <div class="modal-header">
@@ -631,6 +714,7 @@
 </div>
 {% endif %}
 
+{% if is_owner %}
 <!-- Danger Zone -->
 <div class="danger-zone">
   <div class="danger-zone-text">
@@ -642,6 +726,7 @@
     <button type="submit" class="btn btn-danger btn-sm">Delete Album</button>
   </form>
 </div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -724,17 +809,20 @@ function renderLightbox() {
   });
 }
 
-document.getElementById('lightbox').addEventListener('click', function(e) {
+const lightbox = document.getElementById('lightbox');
+
+lightbox.addEventListener('click', function(e) {
   if (e.target === this) closeLightbox();
 });
 
 document.addEventListener('keydown', e => {
-  if (!document.getElementById('lightbox').classList.contains('active')) return;
+  if (!lightbox.classList.contains('active')) return;
   if (e.key === 'Escape') closeLightbox();
   if (e.key === 'ArrowLeft') navLightbox(-1);
   if (e.key === 'ArrowRight') navLightbox(1);
 });
 
+{% if is_owner %}
 async function deletePhoto(e, photoId) {
   e.stopPropagation();
   if (!confirm('Delete this file?')) return;
@@ -751,9 +839,10 @@ async function deletePhoto(e, photoId) {
     if (idx > -1) photos.splice(idx, 1);
   }
 }
+{% endif %}
 
 // ── Upload Modal ──
-{% if album.allow_upload %}
+{% if can_upload %}
 const UPLOAD_URL = {{ url_for('do_upload', token=album.token)|tojson }};
 let selectedFiles = [];
 
@@ -816,6 +905,10 @@ function humanSize(bytes) {
   const units = ['B','KB','MB','GB'];
   let i = 0; while (bytes >= 1024 && i < 3) { bytes /= 1024; i++; }
   return bytes.toFixed(1) + ' ' + units[i];
+}
+
+function escHtml(str) {
+  return str.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
 
 async function startUpload() {

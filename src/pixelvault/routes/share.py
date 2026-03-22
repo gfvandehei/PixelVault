@@ -1,26 +1,22 @@
-from flask import render_template, request, url_for, abort, jsonify, send_file
+from flask import render_template, request, url_for, abort, jsonify, send_file, redirect, session
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
 
 from ..extensions import db, limiter
-from ..models import Album, Photo
+from ..models import Album, Photo, AlbumAccess
 from ..utils import validate_file, save_file, build_album_zip
 
 
 def register(app):
 
     @app.route('/share/<token>', methods=['GET'])
-    @login_required
     def album_upload(token):
-        """Render the shared upload page for an album, allowing guests to browse and upload files."""
+        """Redirect the share link to the album page. Sets the upload session token so the guest can upload."""
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
             abort(404)
-        return render_template('album_upload.html', album=album,
-            read_only=False,
-            api_url=url_for('api_album_photos', token=token),
-            upload_url=url_for('do_upload', token=token),
-            download_url=url_for('download_album_share', token=token))
+        session['album_upload_token'] = token
+        return redirect(url_for('album_view', token=token))
 
     @app.route('/view/<view_token>', methods=['GET'])
     @login_required
@@ -29,10 +25,18 @@ def register(app):
         album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
         if album is None:
             abort(404)
-        return render_template('album_upload.html', album=album,
-            read_only=True,
-            api_url=url_for('api_album_view_photos', view_token=view_token),
-            upload_url=None,
+        session['album_access_token'] = album.token
+        photos = db.session.query(Photo).filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
+        if not db.session.query(AlbumAccess).filter_by(
+            user_id=current_user.id, album_id=album.id
+        ).first():
+            db.session.add(AlbumAccess(user_id=current_user.id, album_id=album.id, access_type='view'))
+            db.session.commit()
+        return render_template('album_view.html', album=album, photos=photos,
+            can_upload=False,
+            is_owner=False,
+            share_url=None,
+            view_share_url=None,
             download_url=url_for('download_album_view', view_token=view_token))
 
     @app.route('/share/<token>/upload', methods=['POST'])
@@ -87,6 +91,10 @@ def register(app):
             db.session.add(photo)
             results.append({'filename': file.filename, 'success': True})
 
+        if not db.session.query(AlbumAccess).filter_by(
+            user_id=current_user.id, album_id=album.id
+        ).first():
+            db.session.add(AlbumAccess(user_id=current_user.id, album_id=album.id))
         db.session.commit()
         return jsonify({'results': results})
 

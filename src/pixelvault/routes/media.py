@@ -4,7 +4,7 @@ from flask import abort, session, send_from_directory, make_response
 from flask_login import login_required, current_user
 
 from ..extensions import db
-from ..models import Album, Photo
+from ..models import Album, Photo, AlbumAccess
 
 _CACHE_HEADERS = 'private, max-age=31536000, immutable'
 
@@ -34,7 +34,11 @@ def register(app):
         album = db.session.get(Album, photo.album_id)
 
         if current_user.is_authenticated and (
-            album.owner_id == current_user.id or photo.uploader_id == current_user.id
+            album.owner_id == current_user.id
+            or photo.uploader_id == current_user.id
+            or db.session.query(AlbumAccess).filter_by(
+                user_id=current_user.id, album_id=album.id
+            ).first()
         ):
             pass
         else:

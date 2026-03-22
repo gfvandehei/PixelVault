@@ -164,7 +164,7 @@
         <a href="{{ url_for('album_view', token=album.token) }}" class="btn btn-ghost btn-sm">
           View →
         </a>
-        <button onclick="copyLink('{{ url_for('album_upload', token=album.token, _external=True) }}')"
+        <button onclick="copyLink('{{ url_for('album_view', token=album.token, _external=True) }}')"
                 class="btn btn-ghost btn-sm" title="Copy share link">
           📋 Copy Link
         </button>
@@ -174,7 +174,7 @@
   {% endfor %}
 </div>
 
-{% else %}
+{% elif not shared %}
 <div class="empty-state">
   <div class="icon">📷</div>
   <h3>No albums yet</h3>
@@ -183,15 +183,15 @@
 </div>
 {% endif %}
 
-{% if contributed %}
+{% if shared %}
 <div class="page-header" style="margin-top:3rem;">
-  <h1 style="font-size:1.6rem;">Contributed To</h1>
-  <p>Albums you've uploaded files to.</p>
+  <h1 style="font-size:1.6rem;">Shared With Me</h1>
+  <p>Albums you have access to.</p>
 </div>
 <div class="albums-grid">
-  {% for album in contributed %}
+  {% for album in shared %}
   <div class="album-card">
-    <a href="{{ url_for('album_upload', token=album.token) }}" class="album-thumb">
+    <a href="{{ url_for('album_view', token=album.token) }}" class="album-thumb">
       {% if album.cover_photo %}
         <img src="{{ url_for('serve_media', filename='thumb_' + album.cover_photo.stored_filename if album.cover_photo.has_thumbnail else album.cover_photo.stored_filename) }}"
              alt="{{ album.name }}" loading="lazy">
@@ -212,8 +212,8 @@
         <span class="badge badge-dim">by {{ album.owner.username }}</span>
       </div>
       <div class="album-actions">
-        <a href="{{ url_for('album_upload', token=album.token) }}" class="btn btn-ghost btn-sm">
-          Upload More →
+        <a href="{{ url_for('album_view', token=album.token) }}" class="btn btn-ghost btn-sm">
+          View →
         </a>
       </div>
     </div>
