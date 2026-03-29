@@ -86,7 +86,7 @@ def register(app):
         photos = db.session.query(Photo).filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
 
         if is_owner:
-            share_url = url_for('album_view', token=token, _external=True)
+            share_url = url_for('album_upload', token=token, _external=True)
             view_share_url = url_for('album_view_only', view_token=album.view_token, _external=True) if album.view_token else None
             download_url = url_for('download_album', token=token)
             can_upload = True
