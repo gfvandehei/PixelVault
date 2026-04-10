@@ -2,8 +2,8 @@ from flask import render_template, request, redirect, url_for, flash, abort
 from flask_login import login_required
 
 from ..extensions import db, limiter
-from ..models import AllowedEmail, User
-from ..utils import admin_required
+from ..models import AllowedEmail, User, Album
+from ..utils import admin_required, delete_photo_files
 
 
 def register(app):
@@ -12,10 +12,15 @@ def register(app):
     @login_required
     @admin_required
     def admin_panel():
-        """Render the admin dashboard showing all allowed emails and registered users."""
+        """Render the admin dashboard showing all allowed emails, registered users, and all albums."""
         allowed_emails = db.session.query(AllowedEmail).order_by(AllowedEmail.added_at.desc()).all()
         users = db.session.query(User).order_by(User.created_at.desc()).all()
-        return render_template('admin.html', allowed_emails=allowed_emails, users=users)
+        albums = db.session.query(Album).order_by(Album.created_at.desc()).all()
+        user_storage = {
+            user.id: sum(photo.file_size for album in user.albums for photo in album.photos)
+            for user in users
+        }
+        return render_template('admin.html', allowed_emails=allowed_emails, users=users, albums=albums, user_storage=user_storage)
 
     @app.route('/admin/email/add', methods=['POST'])
     @login_required
@@ -38,6 +43,22 @@ def register(app):
         db.session.add(entry)
         db.session.commit()
         flash(f'{email} has been authorized.', 'success')
+        return redirect(url_for('admin_panel'))
+
+    @app.route('/admin/album/<int:album_id>/delete', methods=['POST'])
+    @login_required
+    @admin_required
+    def admin_delete_album(album_id):
+        """Delete any album and all its files as an admin action."""
+        album = db.session.get(Album, album_id)
+        if not album:
+            abort(404)
+        name = album.name
+        for photo in album.photos:
+            delete_photo_files(photo)
+        db.session.delete(album)
+        db.session.commit()
+        flash(f'Album "{name}" has been deleted.', 'info')
         return redirect(url_for('admin_panel'))
 
     @app.route('/admin/email/<int:entry_id>/remove', methods=['POST'])

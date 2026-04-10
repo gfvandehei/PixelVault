@@ -117,6 +117,113 @@
     flex-shrink: 0;
     text-align: right;
   }
+
+  .user-filter-bar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .user-filter-bar input,
+  .user-filter-bar select {
+    flex: 1;
+    width: auto;
+  }
+
+  .user-no-results {
+    display: none;
+    padding: 2rem 0;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
+
+  .user-storage {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    margin-top: 0.15rem;
+  }
+
+  .albums-section {
+    margin-top: 2rem;
+  }
+
+  .album-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-top: 1.25rem;
+  }
+
+  .album-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+
+  .album-card:hover {
+    border-color: var(--accent, #6366f1);
+    box-shadow: 0 0 0 1px var(--accent, #6366f1);
+  }
+
+  .album-card-link {
+    text-decoration: none;
+    color: inherit;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    flex: 1;
+  }
+
+  .album-card-name {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .album-card-meta {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+
+  .album-card-footer {
+    margin-top: auto;
+    padding-top: 0.5rem;
+  }
+
+  .album-filter-bar {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .album-filter-bar input,
+  .album-filter-bar select {
+    flex: 1;
+    width: auto;
+  }
+
+  .album-no-results {
+    display: none;
+    padding: 2rem 0;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+  }
 </style>
 {% endblock %}
 
@@ -178,10 +285,39 @@
     <div class="card">
       <div class="section-title">Registered Users ({{ users|length }})</div>
 
-      <div class="user-list">
+      {% if users %}
+        <div class="user-filter-bar">
+          <input type="text" id="user-filter-name" placeholder="Search by username…" oninput="filterUsers()">
+          <input type="text" id="user-filter-email" placeholder="Search by email…" oninput="filterUsers()">
+          <select id="user-filter-username" onchange="filterUsers()">
+            <option value="">All users</option>
+            {% for user in users %}
+              <option value="{{ user.username | lower }}">{{ user.username }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div id="user-no-results" class="user-no-results">No users match your filter.</div>
+      {% endif %}
+
+      <div class="user-list" id="user-list">
         {% if users %}
           {% for user in users %}
-          <div class="user-row">
+          {% set storage = user_storage[user.id] %}
+          {% set s_kb = storage / 1024 %}
+          {% set s_mb = s_kb / 1024 %}
+          {% set s_gb = s_mb / 1024 %}
+          {% if storage < 1024 %}
+            {% set storage_str = storage | string + ' B' %}
+          {% elif s_kb < 1024 %}
+            {% set storage_str = '%.1f KB' | format(s_kb) %}
+          {% elif s_mb < 1024 %}
+            {% set storage_str = '%.1f MB' | format(s_mb) %}
+          {% else %}
+            {% set storage_str = '%.1f GB' | format(s_gb) %}
+          {% endif %}
+          <div class="user-row"
+               data-username="{{ user.username | lower }}"
+               data-email="{{ user.email | lower }}">
             <div>
               <div class="user-row-name">
                 {{ user.username }}
@@ -190,6 +326,7 @@
                 {% endif %}
               </div>
               <div class="user-row-email">{{ user.email }}</div>
+              <div class="user-storage">{{ storage_str }} used</div>
             </div>
             <div class="user-row-meta">
               {{ user.albums|length }} album{{ 's' if user.albums|length != 1 }}<br>
@@ -207,4 +344,104 @@
   </div>
 
 </div>
+
+<!-- All Albums -->
+<div class="albums-section">
+  <div class="card">
+    <div class="section-title">All Albums ({{ albums|length }})</div>
+
+    {% if albums %}
+      <div class="album-filter-bar">
+        <input type="text" id="album-filter-name" placeholder="Filter by name…" oninput="filterAlbums()">
+        <select id="album-filter-owner" onchange="filterAlbums()">
+          <option value="">All owners</option>
+          {% for user in users if user.albums %}
+            <option value="{{ user.username | lower }}">{{ user.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div id="album-no-results" class="album-no-results">No albums match your filter.</div>
+      <div class="album-cards" id="album-cards-grid">
+        {% for album in albums %}
+          {% set total_size = album.photos | sum(attribute='file_size') %}
+          {% set size_kb = total_size / 1024 %}
+          {% set size_mb = size_kb / 1024 %}
+          {% set size_gb = size_mb / 1024 %}
+          {% if total_size < 1024 %}
+            {% set size_str = total_size | string + ' B' %}
+          {% elif size_kb < 1024 %}
+            {% set size_str = '%.1f KB' | format(size_kb) %}
+          {% elif size_mb < 1024 %}
+            {% set size_str = '%.1f MB' | format(size_mb) %}
+          {% else %}
+            {% set size_str = '%.1f GB' | format(size_gb) %}
+          {% endif %}
+          <div class="album-card"
+               data-name="{{ album.name | lower }}"
+               data-owner="{{ album.owner.username | lower }}"
+               onclick="window.location='{{ url_for('album_view', token=album.token) }}'">
+            <a href="{{ url_for('album_view', token=album.token) }}" class="album-card-link">
+              <div class="album-card-name" title="{{ album.name }}">{{ album.name }}</div>
+              <div class="album-card-meta">
+                <span>Owner: {{ album.owner.username }}</span>
+                <span>{{ album.photos|length }} file{{ 's' if album.photos|length != 1 }}</span>
+                <span>{{ size_str }}</span>
+                <span>{{ album.created_at.strftime('%b %d, %Y') }}</span>
+              </div>
+            </a>
+            <div class="album-card-footer">
+              <form method="POST" action="{{ url_for('admin_delete_album', album_id=album.id) }}"
+                    onsubmit="return confirm('Permanently delete album &quot;{{ album.name | replace('&quot;', '') }}&quot; and all its files? This cannot be undone.')"
+                    onclick="event.stopPropagation()">
+                <button type="submit" class="btn btn-danger btn-sm" style="width:100%;">Delete</button>
+              </form>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state" style="padding:2rem 0;">
+        <p>No albums have been created yet.</p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function filterUsers() {
+    const name = document.getElementById('user-filter-name').value.toLowerCase().trim();
+    const email = document.getElementById('user-filter-email').value.toLowerCase().trim();
+    const username = document.getElementById('user-filter-username').value;
+    const rows = document.querySelectorAll('#user-list .user-row');
+    let visible = 0;
+    rows.forEach(row => {
+      const matchName = !name || row.dataset.username.includes(name);
+      const matchEmail = !email || row.dataset.email.includes(email);
+      const matchUsername = !username || row.dataset.username === username;
+      const show = matchName && matchEmail && matchUsername;
+      row.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    const noResults = document.getElementById('user-no-results');
+    if (noResults) noResults.style.display = visible === 0 ? 'block' : 'none';
+  }
+
+  function filterAlbums() {
+    const name = document.getElementById('album-filter-name').value.toLowerCase().trim();
+    const owner = document.getElementById('album-filter-owner').value;
+    const cards = document.querySelectorAll('#album-cards-grid .album-card');
+    let visible = 0;
+    cards.forEach(card => {
+      const matchName = !name || card.dataset.name.includes(name);
+      const matchOwner = !owner || card.dataset.owner === owner;
+      const show = matchName && matchOwner;
+      card.style.display = show ? '' : 'none';
+      if (show) visible++;
+    });
+    document.getElementById('album-no-results').style.display = visible === 0 ? 'block' : 'none';
+  }
+</script>
 {% endblock %}
