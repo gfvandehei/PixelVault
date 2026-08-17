@@ -30,7 +30,7 @@ def main():
                         help="Path to .env file (default: .env)")
     args = parser.parse_args()
 
-    from sqlalchemy import create_engine
+    from sqlalchemy import create_engine, text as sqlalchemy_text
     from sqlalchemy.orm import Session
     load_dotenv(args.env)
     from pixelvault.models import Photo, Base
@@ -46,6 +46,13 @@ def main():
 
     with Session(engine) as session:
         Base.metadata.create_all(engine)
+        with engine.connect() as conn:
+            try:
+                conn.execute(sqlalchemy_text("ALTER TABLE photo ADD COLUMN taken_at DATETIME"))
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
+
         photos = session.query(Photo).filter(Photo.taken_at == None).all()
 
         if not photos:
