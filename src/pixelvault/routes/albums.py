@@ -1,12 +1,31 @@
+from datetime import datetime, timedelta
+
 from flask import render_template, request, redirect, url_for, flash, abort, jsonify, session
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
 
 from ..extensions import db, limiter
-from ..models import Album, Photo, AlbumAccess
+from ..models import Album, Photo, AlbumAccess, User
 from ..utils import delete_photo_files, build_album_zip
 from flask import send_file
 from sqlalchemy.exc import NoResultFound
+
+
+def _owned_and_shared_ids(user):
+    """Return (owned_album_ids, shared_album_ids) visible to the given user.
+
+    Shared albums are ones the user contributed uploads to or visited via a
+    share link, excluding anything they own.
+    """
+    owned_ids = {row.id for row in db.session.query(Album.id).filter_by(owner_id=user.id)}
+    contributed_ids = {row.album_id for row in db.session.query(Photo.album_id).filter(
+        Photo.uploader_id == user.id
+    ).distinct()}
+    accessed_ids = {row.album_id for row in db.session.query(AlbumAccess.album_id).filter(
+        AlbumAccess.user_id == user.id
+    )}
+    shared_ids = (contributed_ids | accessed_ids) - owned_ids
+    return owned_ids, shared_ids
 
 
 def register(app):
@@ -18,24 +37,97 @@ def register(app):
         Render the user's dashboard.
 
         Shows albums the current user owns, plus any albums they have contributed
-        uploads to (but don't own).
+        uploads to (but don't own). Supports filtering by owner(s), contributor(s),
+        a taken-date range, a name search, and an owned/shared/all scope, all via
+        query params so results stay bookmarkable.
         """
-        albums = db.session.query(Album).filter_by(owner_id=current_user.id).order_by(Album.created_at.desc()).all()
+        owner_ids = [int(v) for v in request.args.getlist('owners') if v.isdigit()]
+        contributor_ids = [int(v) for v in request.args.getlist('contributors') if v.isdigit()]
+        start_date = request.args.get('start_date', '').strip()
+        end_date = request.args.get('end_date', '').strip()
+        q = request.args.get('q', '').strip()
+        scope = request.args.get('scope', 'all')
+        if scope not in ('owned', 'shared', 'all'):
+            scope = 'all'
 
-        # Collect album IDs from both uploads and share-link visits
-        contributed_ids = {row.album_id for row in db.session.query(Photo.album_id).filter(
-            Photo.uploader_id == current_user.id
-        ).distinct()}
-        accessed_ids = {row.album_id for row in db.session.query(AlbumAccess.album_id).filter(
-            AlbumAccess.user_id == current_user.id
-        )}
-        guest_ids = list(contributed_ids | accessed_ids)
-        shared = db.session.query(Album).filter(
-            Album.id.in_(guest_ids),
-            Album.owner_id != current_user.id
-        ).order_by(Album.created_at.desc()).all() if guest_ids else []
+        owned_ids, shared_ids = _owned_and_shared_ids(current_user)
+        if scope == 'owned':
+            visible_ids = owned_ids
+        elif scope == 'shared':
+            visible_ids = shared_ids
+        else:
+            visible_ids = owned_ids | shared_ids
 
-        return render_template('dashboard.html', albums=albums, shared=shared)
+        albums, shared = [], []
+        if visible_ids:
+            query = db.session.query(Album).filter(Album.id.in_(visible_ids))
+
+            if owner_ids:
+                query = query.filter(Album.owner_id.in_(owner_ids))
+
+            if contributor_ids:
+                contributor_album_ids = db.session.query(Photo.album_id).filter(
+                    Photo.uploader_id.in_(contributor_ids)
+                ).distinct()
+                query = query.filter(Album.id.in_(contributor_album_ids))
+
+            if start_date or end_date:
+                photo_ids = db.session.query(Photo.album_id)
+                try:
+                    if start_date:
+                        photo_ids = photo_ids.filter(Photo.taken_at >= datetime.strptime(start_date, '%Y-%m-%d'))
+                    if end_date:
+                        photo_ids = photo_ids.filter(
+                            Photo.taken_at < datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+                        )
+                    query = query.filter(Album.id.in_(photo_ids.distinct()))
+                except ValueError:
+                    pass
+
+            if q:
+                query = query.filter(Album.name.ilike(f'%{q}%'))
+
+            results = query.order_by(Album.created_at.desc()).all()
+            albums = [a for a in results if a.id in owned_ids]
+            shared = [a for a in results if a.id not in owned_ids]
+
+        filters = {
+            'owners': owner_ids,
+            'contributors': contributor_ids,
+            'start_date': start_date,
+            'end_date': end_date,
+            'q': q,
+            'scope': scope,
+        }
+        return render_template('dashboard.html', albums=albums, shared=shared, filters=filters)
+
+    @app.route('/api/dashboard/filter-options')
+    @login_required
+    def dashboard_filter_options():
+        """Return the owners, contributors, and taken-date bounds available for the current user's dashboard filters."""
+        owned_ids, shared_ids = _owned_and_shared_ids(current_user)
+        visible_ids = owned_ids | shared_ids
+        if not visible_ids:
+            return jsonify({'owners': [], 'contributors': [], 'min_date': None, 'max_date': None})
+
+        owners = db.session.query(User.id, User.username).join(Album, Album.owner_id == User.id).filter(
+            Album.id.in_(visible_ids)
+        ).distinct().order_by(User.username).all()
+
+        contributors = db.session.query(User.id, User.username).join(Photo, Photo.uploader_id == User.id).filter(
+            Photo.album_id.in_(visible_ids)
+        ).distinct().order_by(User.username).all()
+
+        bounds = db.session.query(
+            db.func.min(Photo.taken_at), db.func.max(Photo.taken_at)
+        ).filter(Photo.album_id.in_(visible_ids)).one()
+
+        return jsonify({
+            'owners': [{'id': u.id, 'username': u.username} for u in owners],
+            'contributors': [{'id': u.id, 'username': u.username} for u in contributors],
+            'min_date': bounds[0].strftime('%Y-%m-%d') if bounds[0] else None,
+            'max_date': bounds[1].strftime('%Y-%m-%d') if bounds[1] else None,
+        })
 
     @app.route('/album/create', methods=['GET', 'POST'])
     @login_required

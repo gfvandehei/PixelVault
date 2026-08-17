@@ -90,6 +90,7 @@ class Photo(Base):
     uploader_name: Mapped[str] = mapped_column(String(64), default='Anonymous')
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    taken_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     has_thumbnail: Mapped[bool] = mapped_column(Boolean, default=False)
 
     @property

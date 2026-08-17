@@ -115,6 +115,7 @@ def _run_migrations():
                 UNIQUE(user_id, album_id)
             )""",
             "ALTER TABLE album_access ADD COLUMN access_type VARCHAR(10) NOT NULL DEFAULT 'upload'",
+            "ALTER TABLE photo ADD COLUMN taken_at DATETIME",
         ]:
             try:
                 conn.execute(db.text(stmt))

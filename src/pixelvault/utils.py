@@ -1,6 +1,7 @@
 import io
 import uuid
 import zipfile
+from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlparse, urljoin
@@ -49,6 +50,29 @@ def validate_file(file_storage):
     return detected_mime, None
 
 
+_EXIF_DATETIME_ORIGINAL = 36867
+_EXIF_DATETIME = 306
+_EXIF_SUBIFD_POINTER = 0x8769
+
+
+def extract_exif_taken_at(img):
+    """Return the photo's EXIF capture date (DateTimeOriginal, falling back to DateTime), or None."""
+    try:
+        exif = img.getexif()
+        date_str = None
+        try:
+            sub_ifd = exif.get_ifd(_EXIF_SUBIFD_POINTER)
+            date_str = sub_ifd.get(_EXIF_DATETIME_ORIGINAL)
+        except Exception:
+            pass
+        date_str = date_str or exif.get(_EXIF_DATETIME)
+        if not date_str:
+            return None
+        return datetime.strptime(date_str, '%Y:%m:%d %H:%M:%S')
+    except Exception:
+        return None
+
+
 def save_file(file_storage, mime_type):
     """Save file with a UUID name and generate thumbnail if image.
     HEIC/HEIF files are converted to JPEG for browser compatibility."""
@@ -62,9 +86,11 @@ def save_file(file_storage, mime_type):
     upload_dir = Path(current_app.config['UPLOAD_FOLDER'])
     upload_dir.mkdir(parents=True, exist_ok=True)
     save_path = upload_dir / stored_name
+    taken_at = None
 
     if is_heic:
         with Image.open(file_storage.stream) as img:
+            taken_at = extract_exif_taken_at(img)
             img = ImageOps.exif_transpose(img)
             img = img.convert('RGB')
             img.save(str(save_path), 'JPEG', quality=92)
@@ -78,6 +104,8 @@ def save_file(file_storage, mime_type):
         try:
             thumb_path = upload_dir / f"thumb_{stored_name}"
             with Image.open(str(save_path)) as img:
+                if taken_at is None:
+                    taken_at = extract_exif_taken_at(img)
                 img = ImageOps.exif_transpose(img)
                 img = img.convert('RGB')
                 img.thumbnail((400, 400), Image.LANCZOS)
@@ -86,7 +114,7 @@ def save_file(file_storage, mime_type):
         except Exception:
             pass
 
-    return stored_name, file_size, has_thumbnail
+    return stored_name, file_size, has_thumbnail, taken_at
 
 
 def is_safe_redirect(target):
