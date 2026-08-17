@@ -73,7 +73,7 @@ def register(app):
                 continue
 
             try:
-                stored_name, file_size, has_thumbnail = save_file(file, mime_type)
+                stored_name, file_size, has_thumbnail, taken_at = save_file(file, mime_type)
             except Exception:
                 results.append({'filename': file.filename, 'error': 'Upload failed.'})
                 continue
@@ -87,6 +87,7 @@ def register(app):
                 mime_type=mime_type,
                 file_size=file_size,
                 has_thumbnail=has_thumbnail,
+                taken_at=taken_at,
             )
             db.session.add(photo)
             results.append({'filename': file.filename, 'success': True})

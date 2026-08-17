@@ -109,6 +109,148 @@
     letter-spacing: 0.05em;
     text-transform: uppercase;
   }
+
+  .filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 1.25rem;
+    padding: 1.1rem 1.25rem;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 1.5rem;
+  }
+
+  .filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    min-width: 140px;
+  }
+
+  .filter-group-wide { min-width: 220px; flex: 1 1 260px; }
+
+  .filter-group label {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .filter-group input[type="text"],
+  .filter-group select {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 0.45rem 0.6rem;
+    font-size: 0.85rem;
+  }
+
+  .multi-select { position: relative; }
+
+  .multi-select summary {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    list-style: none;
+    color: var(--text);
+  }
+
+  .multi-select summary::-webkit-details-marker { display: none; }
+
+  .multi-select-panel {
+    position: absolute;
+    top: calc(100% + 0.3rem);
+    left: 0;
+    z-index: 20;
+    min-width: 180px;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.5rem;
+  }
+
+  .multi-select-panel label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    padding: 0.3rem 0.2rem;
+    cursor: pointer;
+  }
+
+  .multi-select-panel .empty {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding: 0.3rem 0.2rem;
+  }
+
+  .date-range-slider {
+    position: relative;
+    height: 1.4rem;
+  }
+
+  .date-range-slider input[type="range"] {
+    position: absolute;
+    width: 100%;
+    top: 0.5rem;
+    margin: 0;
+    background: transparent;
+    pointer-events: none;
+    -webkit-appearance: none;
+  }
+
+  .date-range-slider input[type="range"]::-webkit-slider-thumb {
+    pointer-events: auto;
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--amber);
+    cursor: pointer;
+  }
+
+  .date-range-slider input[type="range"]::-moz-range-thumb {
+    pointer-events: auto;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--amber);
+    cursor: pointer;
+    border: none;
+  }
+
+  .date-range-track {
+    position: absolute;
+    top: 0.9rem;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+  }
+
+  .date-range-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    margin-top: 0.3rem;
+  }
+
+  .filter-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
 </style>
 {% endblock %}
 
@@ -120,6 +262,62 @@
   </div>
   <a href="{{ url_for('create_album') }}" class="btn btn-primary">+ New Album</a>
 </div>
+
+<form class="filter-bar" method="get" action="{{ url_for('dashboard') }}" id="filterForm">
+  <div class="filter-group">
+    <label for="qInput">Search</label>
+    <input type="text" id="qInput" name="q" value="{{ filters.q }}" placeholder="Album name…">
+  </div>
+
+  <div class="filter-group">
+    <label for="scopeSelect">Show</label>
+    <select id="scopeSelect" name="scope">
+      <option value="all" {% if filters.scope == 'all' %}selected{% endif %}>All Albums</option>
+      <option value="owned" {% if filters.scope == 'owned' %}selected{% endif %}>Owned by Me</option>
+      <option value="shared" {% if filters.scope == 'shared' %}selected{% endif %}>Shared with Me</option>
+    </select>
+  </div>
+
+  <div class="filter-group">
+    <label>Owners</label>
+    <details class="multi-select" id="ownersSelect">
+      <summary id="ownersSummary">Any owner</summary>
+      <div class="multi-select-panel" id="ownersPanel">
+        <div class="empty">Loading…</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="filter-group">
+    <label>Contributors</label>
+    <details class="multi-select" id="contributorsSelect">
+      <summary id="contributorsSummary">Any contributor</summary>
+      <div class="multi-select-panel" id="contributorsPanel">
+        <div class="empty">Loading…</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="filter-group filter-group-wide">
+    <label>Date Taken</label>
+    <div class="date-range-slider">
+      <div class="date-range-track"></div>
+      <input type="range" id="dateMinRange" min="0" max="100" value="0" step="1">
+      <input type="range" id="dateMaxRange" min="0" max="100" value="100" step="1">
+    </div>
+    <div class="date-range-labels">
+      <span id="dateMinLabel">—</span>
+      <span id="dateMaxLabel">—</span>
+    </div>
+    <input type="hidden" name="start_date" id="startDateInput" value="{{ filters.start_date }}">
+    <input type="hidden" name="end_date" id="endDateInput" value="{{ filters.end_date }}">
+  </div>
+
+  <div class="filter-actions">
+    <button type="submit" class="btn btn-primary btn-sm">Apply</button>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-ghost btn-sm">Clear</a>
+  </div>
+</form>
 
 {% if albums %}
 <div class="stats-row">
@@ -177,9 +375,15 @@
 {% elif not shared %}
 <div class="empty-state">
   <div class="icon">📷</div>
+  {% if filters.owners or filters.contributors or filters.start_date or filters.end_date or filters.q or filters.scope != 'all' %}
+  <h3>No albums match these filters</h3>
+  <p>Try clearing or adjusting the filters above.</p>
+  <a href="{{ url_for('dashboard') }}" class="btn btn-primary">Clear Filters</a>
+  {% else %}
   <h3>No albums yet</h3>
   <p>Create your first album and share it with friends to start collecting photos.</p>
   <a href="{{ url_for('create_album') }}" class="btn btn-primary">Create Album</a>
+  {% endif %}
 </div>
 {% endif %}
 
@@ -225,6 +429,107 @@
 
 {% block scripts %}
 <script>
+const SELECTED_OWNERS = {{ filters.owners|tojson }};
+const SELECTED_CONTRIBUTORS = {{ filters.contributors|tojson }};
+
+function buildMultiSelect(panelId, summaryId, name, users, selectedIds, noun) {
+  const panel = document.getElementById(panelId);
+  const summary = document.getElementById(summaryId);
+
+  if (!users.length) {
+    panel.innerHTML = '<div class="empty">No ' + noun + ' yet</div>';
+    return;
+  }
+
+  panel.innerHTML = users.map(function (u) {
+    const checked = selectedIds.includes(u.id) ? 'checked' : '';
+    return '<label><input type="checkbox" name="' + name + '" value="' + u.id + '" ' + checked + '>' +
+           u.username + '</label>';
+  }).join('');
+
+  function updateSummary() {
+    const checked = panel.querySelectorAll('input:checked');
+    summary.textContent = checked.length
+      ? checked.length + ' ' + noun + (checked.length === 1 ? '' : 's') + ' selected'
+      : 'Any ' + noun;
+  }
+
+  panel.addEventListener('change', updateSummary);
+  updateSummary();
+}
+
+function initDateRangeSlider(minDate, maxDate) {
+  const minRange = document.getElementById('dateMinRange');
+  const maxRange = document.getElementById('dateMaxRange');
+  const minLabel = document.getElementById('dateMinLabel');
+  const maxLabel = document.getElementById('dateMaxLabel');
+  const startInput = document.getElementById('startDateInput');
+  const endInput = document.getElementById('endDateInput');
+
+  if (!minDate || !maxDate) {
+    minLabel.textContent = 'No dated photos';
+    maxLabel.textContent = '';
+    minRange.disabled = true;
+    maxRange.disabled = true;
+    return;
+  }
+
+  const minTs = new Date(minDate).getTime();
+  const maxTs = new Date(maxDate).getTime();
+  const span = Math.max(maxTs - minTs, 1);
+
+  function pctToDate(pct) {
+    const ts = minTs + (span * pct / 100);
+    return new Date(ts).toISOString().slice(0, 10);
+  }
+
+  function dateToPct(dateStr) {
+    const ts = new Date(dateStr).getTime();
+    return Math.min(100, Math.max(0, ((ts - minTs) / span) * 100));
+  }
+
+  if (startInput.value) minRange.value = dateToPct(startInput.value);
+  if (endInput.value) maxRange.value = dateToPct(endInput.value);
+
+  function render() {
+    let lo = parseFloat(minRange.value);
+    let hi = parseFloat(maxRange.value);
+    if (lo > hi) { [lo, hi] = [hi, lo]; minRange.value = lo; maxRange.value = hi; }
+
+    const startDate = pctToDate(lo);
+    const endDate = pctToDate(hi);
+    minLabel.textContent = startDate;
+    maxLabel.textContent = endDate;
+    startInput.value = lo <= 0 ? '' : startDate;
+    endInput.value = hi >= 100 ? '' : endDate;
+  }
+
+  minRange.addEventListener('input', render);
+  maxRange.addEventListener('input', render);
+  render();
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  fetch('{{ url_for("dashboard_filter_options") }}')
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      buildMultiSelect('ownersPanel', 'ownersSummary', 'owners', data.owners, SELECTED_OWNERS, 'owner');
+      buildMultiSelect('contributorsPanel', 'contributorsSummary', 'contributors', data.contributors, SELECTED_CONTRIBUTORS, 'contributor');
+      initDateRangeSlider(data.min_date, data.max_date);
+    })
+    .catch(function () {
+      document.getElementById('ownersPanel').innerHTML = '<div class="empty">Unavailable</div>';
+      document.getElementById('contributorsPanel').innerHTML = '<div class="empty">Unavailable</div>';
+    });
+
+  // Close open multi-select dropdowns when clicking outside them
+  document.addEventListener('click', function (e) {
+    document.querySelectorAll('.multi-select[open]').forEach(function (el) {
+      if (!el.contains(e.target)) el.removeAttribute('open');
+    });
+  });
+});
+
 function copyLink(url) {
   function onSuccess() {
     const flash = document.createElement('div');
