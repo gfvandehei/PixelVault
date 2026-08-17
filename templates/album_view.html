@@ -106,6 +106,139 @@
     text-align: right;
   }
 
+  /* ── Filter bar ── */
+  .filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 1.25rem;
+    padding: 1.1rem 1.25rem;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 1.5rem;
+  }
+
+  .filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    min-width: 140px;
+  }
+
+  .filter-group-wide { min-width: 220px; flex: 1 1 260px; }
+
+  .filter-group label {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .multi-select { position: relative; }
+
+  .multi-select summary {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.45rem 0.6rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    list-style: none;
+    color: var(--text);
+  }
+
+  .multi-select summary::-webkit-details-marker { display: none; }
+
+  .multi-select-panel {
+    position: absolute;
+    top: calc(100% + 0.3rem);
+    left: 0;
+    z-index: 20;
+    min-width: 180px;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.5rem;
+  }
+
+  .multi-select-panel label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    padding: 0.3rem 0.2rem;
+    cursor: pointer;
+  }
+
+  .multi-select-panel .empty {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding: 0.3rem 0.2rem;
+  }
+
+  .date-range-slider {
+    position: relative;
+    height: 1.4rem;
+  }
+
+  .date-range-slider input[type="range"] {
+    position: absolute;
+    width: 100%;
+    top: 0.5rem;
+    margin: 0;
+    background: transparent;
+    pointer-events: none;
+    -webkit-appearance: none;
+  }
+
+  .date-range-slider input[type="range"]::-webkit-slider-thumb {
+    pointer-events: auto;
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--amber);
+    cursor: pointer;
+  }
+
+  .date-range-slider input[type="range"]::-moz-range-thumb {
+    pointer-events: auto;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--amber);
+    cursor: pointer;
+    border: none;
+  }
+
+  .date-range-track {
+    position: absolute;
+    top: 0.9rem;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+  }
+
+  .date-range-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    margin-top: 0.3rem;
+  }
+
+  .filter-actions {
+    display: flex;
+    gap: 0.5rem;
+  }
+
   /* ── Photos grid ── */
   .photos-toolbar {
     display: flex;
@@ -147,6 +280,8 @@
   }
 
   .photo-item:hover img, .photo-item:hover video { transform: scale(1.05); }
+
+  .photo-item.filtered-out { display: none; }
 
   .photo-overlay {
     position: absolute;
@@ -630,6 +765,35 @@
 {% endif %}
 
 <!-- Photos -->
+{% if photos %}
+<div class="filter-bar" id="albumFilterBar">
+  <div class="filter-group" id="uploaderFilterGroup">
+    <label>Uploaded By</label>
+    <details class="multi-select" id="uploaderSelect">
+      <summary id="uploaderSummary">Anyone</summary>
+      <div class="multi-select-panel" id="uploaderPanel"></div>
+    </details>
+  </div>
+
+  <div class="filter-group filter-group-wide" id="dateFilterGroup">
+    <label>Date Taken</label>
+    <div class="date-range-slider">
+      <div class="date-range-track"></div>
+      <input type="range" id="dateMinRange" min="0" max="100" value="0" step="1">
+      <input type="range" id="dateMaxRange" min="0" max="100" value="100" step="1">
+    </div>
+    <div class="date-range-labels">
+      <span id="dateMinLabel">—</span>
+      <span id="dateMaxLabel">—</span>
+    </div>
+  </div>
+
+  <div class="filter-actions">
+    <button type="button" class="btn btn-ghost btn-sm" id="clearFiltersBtn">Clear Filters</button>
+  </div>
+</div>
+{% endif %}
+
 <div class="photos-toolbar">
   <h2>{{ photos|length }} file{{ 's' if photos|length != 1 }} uploaded</h2>
   <div style="display:flex;gap:0.5rem;align-items:center;">
@@ -645,7 +809,7 @@
 {% if photos %}
 <div class="photos-grid" id="photosGrid">
   {% for photo in photos %}
-  <div class="photo-item" onclick="openLightbox({{ loop.index0 }})" data-id="{{ photo.id }}">
+  <div class="photo-item" onclick="openLightbox({{ photo.id }})" data-id="{{ photo.id }}">
     {% if photo.is_video %}
       <span class="video-badge">▶ VIDEO</span>
       <video src="{{ url_for('serve_media', filename=photo.stored_filename) }}" muted playsinline
@@ -740,13 +904,14 @@ const photos = [
     name: {{ photo.original_filename|tojson }},
     uploader: {{ photo.uploader_name|tojson }},
     date: {{ photo.uploaded_at.strftime('%b %d, %Y %H:%M')|tojson }},
+    takenAt: {{ (photo.taken_at or photo.uploaded_at).isoformat()|tojson }},
     size: {{ photo.file_size_human|tojson }},
     isVideo: {{ 'true' if photo.is_video else 'false' }},
   },
   {% endfor %}
 ];
 
-let currentIdx = 0;
+let currentPhotoId = null;
 const imageCache = new Map();
 
 function preloadImage(url) {
@@ -757,8 +922,17 @@ function preloadImage(url) {
   return img;
 }
 
-function openLightbox(idx) {
-  currentIdx = idx;
+function visiblePhotoIds() {
+  return photos
+    .filter(p => {
+      const el = document.querySelector(`.photo-item[data-id="${p.id}"]`);
+      return el && !el.classList.contains('filtered-out');
+    })
+    .map(p => p.id);
+}
+
+function openLightbox(photoId) {
+  currentPhotoId = photoId;
   renderLightbox();
   document.getElementById('lightbox').classList.add('active');
   document.body.style.overflow = 'hidden';
@@ -771,12 +945,16 @@ function closeLightbox() {
 }
 
 function navLightbox(dir) {
-  currentIdx = (currentIdx + dir + photos.length) % photos.length;
+  const ids = visiblePhotoIds();
+  if (!ids.length) return;
+  const pos = ids.indexOf(currentPhotoId);
+  currentPhotoId = ids[(pos === -1 ? 0 : pos + dir + ids.length) % ids.length];
   renderLightbox();
 }
 
 function renderLightbox() {
-  const p = photos[currentIdx];
+  const p = photos.find(ph => ph.id === currentPhotoId);
+  if (!p) { closeLightbox(); return; }
   const lbMedia = document.getElementById('lbMedia');
   const lbInfo = document.getElementById('lbInfo');
   const lbDownload = document.getElementById('lbDownload');
@@ -803,10 +981,14 @@ function renderLightbox() {
   lbDownload.download = p.name;
 
   // Preload neighbours so arrow navigation feels instant
-  [-2, -1, 1, 2].forEach(offset => {
-    const neighbour = photos[(currentIdx + offset + photos.length) % photos.length];
-    if (!neighbour.isVideo) preloadImage(neighbour.full);
-  });
+  const ids = visiblePhotoIds();
+  const pos = ids.indexOf(currentPhotoId);
+  if (pos !== -1) {
+    [-2, -1, 1, 2].forEach(offset => {
+      const neighbour = photos.find(ph => ph.id === ids[(pos + offset + ids.length) % ids.length]);
+      if (neighbour && !neighbour.isVideo) preloadImage(neighbour.full);
+    });
+  }
 }
 
 const lightbox = document.getElementById('lightbox');
@@ -996,5 +1178,139 @@ function fallbackCopy(text, onSuccess) {
   try { document.execCommand('copy'); onSuccess(); } catch (_) {}
   document.body.removeChild(ta);
 }
+
+// ── Photo filters ──
+function buildUploaderFilter() {
+  const group = document.getElementById('uploaderFilterGroup');
+  const panel = document.getElementById('uploaderPanel');
+  const summary = document.getElementById('uploaderSummary');
+  if (!group) return;
+
+  const names = [...new Set(photos.map(p => p.uploader))].sort();
+  if (names.length <= 1) {
+    group.style.display = 'none';
+    return;
+  }
+
+  panel.innerHTML = names.map(n =>
+    `<label><input type="checkbox" class="uploader-filter-cb" value="${n.replace(/"/g, '&quot;')}" checked>${n}</label>`
+  ).join('');
+
+  function updateSummary() {
+    const checked = panel.querySelectorAll('input:checked').length;
+    summary.textContent = checked === names.length ? 'Anyone' : `${checked} selected`;
+  }
+
+  panel.addEventListener('change', () => { updateSummary(); applyFilters(); });
+  updateSummary();
+}
+
+let albumDateBounds = null;
+
+function initDateFilterSlider() {
+  const group = document.getElementById('dateFilterGroup');
+  const minRange = document.getElementById('dateMinRange');
+  const maxRange = document.getElementById('dateMaxRange');
+  const minLabel = document.getElementById('dateMinLabel');
+  const maxLabel = document.getElementById('dateMaxLabel');
+  if (!group) return;
+
+  const timestamps = photos.map(p => new Date(p.takenAt).getTime()).filter(t => !isNaN(t));
+  if (!timestamps.length) {
+    group.style.display = 'none';
+    return;
+  }
+
+  const minTs = Math.min(...timestamps);
+  const maxTs = Math.max(...timestamps);
+  albumDateBounds = { minTs, maxTs, span: Math.max(maxTs - minTs, 1) };
+
+  if (minTs === maxTs) {
+    group.style.display = 'none';
+    return;
+  }
+
+  function pctToTs(pct) { return minTs + albumDateBounds.span * pct / 100; }
+  function fmt(ts) { return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); }
+
+  function render() {
+    let lo = parseFloat(minRange.value);
+    let hi = parseFloat(maxRange.value);
+    if (lo > hi) { [lo, hi] = [hi, lo]; minRange.value = lo; maxRange.value = hi; }
+    minLabel.textContent = fmt(pctToTs(lo));
+    maxLabel.textContent = fmt(pctToTs(hi));
+    applyFilters();
+  }
+
+  minRange.addEventListener('input', render);
+  maxRange.addEventListener('input', render);
+  render();
+}
+
+function applyFilters() {
+  const uploaderCbs = document.querySelectorAll('.uploader-filter-cb');
+  const allowedUploaders = uploaderCbs.length
+    ? new Set([...uploaderCbs].filter(cb => cb.checked).map(cb => cb.value))
+    : null;
+
+  const minRange = document.getElementById('dateMinRange');
+  const maxRange = document.getElementById('dateMaxRange');
+  let loTs = -Infinity, hiTs = Infinity;
+  if (minRange && albumDateBounds) {
+    loTs = albumDateBounds.minTs + albumDateBounds.span * parseFloat(minRange.value) / 100;
+    hiTs = albumDateBounds.minTs + albumDateBounds.span * parseFloat(maxRange.value) / 100;
+  }
+
+  let visibleCount = 0;
+  photos.forEach(p => {
+    const el = document.querySelector(`.photo-item[data-id="${p.id}"]`);
+    if (!el) return;
+    const uploaderOk = !allowedUploaders || allowedUploaders.has(p.uploader);
+    const ts = new Date(p.takenAt).getTime();
+    const dateOk = isNaN(ts) ? true : (ts >= loTs && ts <= hiTs);
+    const visible = uploaderOk && dateOk;
+    el.classList.toggle('filtered-out', !visible);
+    if (visible) visibleCount++;
+  });
+
+  const heading = document.querySelector('.photos-toolbar h2');
+  if (heading) {
+    heading.textContent = visibleCount === photos.length
+      ? `${photos.length} file${photos.length !== 1 ? 's' : ''} uploaded`
+      : `${visibleCount} of ${photos.length} files shown`;
+  }
+}
+
+const clearFiltersBtn = document.getElementById('clearFiltersBtn');
+if (clearFiltersBtn) {
+  clearFiltersBtn.addEventListener('click', () => {
+    document.querySelectorAll('.uploader-filter-cb').forEach(cb => { cb.checked = true; });
+    const minRange = document.getElementById('dateMinRange');
+    const maxRange = document.getElementById('dateMaxRange');
+    if (minRange && maxRange) { minRange.value = 0; maxRange.value = 100; }
+    const uploaderPanel = document.getElementById('uploaderPanel');
+    if (uploaderPanel) uploaderPanel.dispatchEvent(new Event('change'));
+    const dateGroup = document.getElementById('dateFilterGroup');
+    if (dateGroup) {
+      const minLabel = document.getElementById('dateMinLabel');
+      const maxLabel = document.getElementById('dateMaxLabel');
+      if (albumDateBounds) {
+        minLabel.textContent = new Date(albumDateBounds.minTs).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+        maxLabel.textContent = new Date(albumDateBounds.maxTs).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+      }
+    }
+    applyFilters();
+  });
+}
+
+document.addEventListener('click', e => {
+  document.querySelectorAll('.multi-select[open]').forEach(el => {
+    if (!el.contains(e.target)) el.removeAttribute('open');
+  });
+});
+
+buildUploaderFilter();
+initDateFilterSlider();
+applyFilters();
 </script>
 {% endblock %}
