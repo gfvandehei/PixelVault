@@ -188,6 +188,16 @@ Both links respect the album-level `allow_upload` toggle.
 | Upload (legacy single-request) | 600/hour |
 | Album create | 30/hour |
 | Admin email add | 60/hour |
+| Chunked `init` | 120/hour |
+| Chunked `status` | 300/hour |
+| Chunked `chunk` | 600/hour, **charged only on non-200** |
+| Chunked `complete` | 600/hour |
+
+The chunk endpoint's budget is sized for *failures*, not traffic: a legitimate 500 MB
+upload is ~63 chunks and spends nothing, while every refusal (409/422/413/400/404) is
+charged so no status is a free 8 MiB sink. It has to be that generous because
+Flask-Limiter checks the limit on entry even when it does not deduct — a small budget
+spent on failures would start rejecting the good chunks too.
 
 ---
 
@@ -227,9 +237,25 @@ Both links respect the album-level `allow_upload` toggle.
 
 ## Tests
 
-No automated test suite exists yet. Testing is currently manual:
-- Use the Docker test container (pre-seeded admin) for feature verification
-- `pytest` + Flask test client is the recommended path for future tests
+`pytest` + Flask test client, in `tests/`. Run with `.venv/bin/python -m pytest tests/ -q`
+(pytest is installed in `.venv`, not in the system interpreter).
+
+| Module | Covers |
+|---|---|
+| `protocol.py` | An executable copy of `docs/upload_protocol.md` — every JSON key and header spelled out as a literal, mirroring what `uploader.js` actually sends |
+| `test_upload_contract.py` | The client/server wire seam: field names, header casing, octet-stream body, shared `results` envelope |
+| `test_upload_lifecycle.py` | Happy path byte-for-byte, resumption, legacy single-request path |
+| `test_upload_integrity.py` | 409/422 handling and the truncate-back crash-safety property |
+| `test_upload_limits.py` | Rate-limit charging asymmetry, size ceilings, per-user quotas |
+| `test_upload_access.py` | Cross-user isolation, revoked `allow_upload`, anonymous callers |
+| `test_upload_recovery.py` | TTL sweep, orphaned partials, quota reclamation |
+| `test_upload_security.py` | Decompression-bomb ceiling and the MIME-not-extension path choice |
+
+`conftest.py` sets the environment before importing the app, because `config.py` reads
+env vars at module import time.
+
+Coverage is upload-focused; the rest of the app is still verified manually via the
+Docker test container. See [#25](https://github.com/gfvandehei/PixelVault/issues/25).
 
 ---
 
