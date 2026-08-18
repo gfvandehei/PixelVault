@@ -16,6 +16,7 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir .
 COPY ./src/pixelvault ./src/pixelvault
 COPY ./templates ./templates
+COPY ./static ./static
 COPY ./app.py ./app.py
 ENV PYTHONPATH=./src
 

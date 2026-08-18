@@ -22,6 +22,7 @@ def create_app():
     app = Flask(
         __name__,
         template_folder=str(TEMPLATES_FOLDER.absolute()),
+        static_folder=str(STATIC_FOLDER.absolute()),
     )
     print(TEMPLATES_FOLDER, file=sys.stderr)
     print(SQLALCHEMY_DATABASE_URI, file=sys.stderr)

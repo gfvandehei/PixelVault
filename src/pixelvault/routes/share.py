@@ -41,7 +41,7 @@ def register(app):
 
     @app.route('/share/<token>/upload', methods=['POST'])
     @login_required
-    @limiter.limit("60 per hour")
+    @limiter.limit("600 per hour")
     def do_upload(token):
         """
         Accept a batch of files uploaded via the share link and save them to the album.
