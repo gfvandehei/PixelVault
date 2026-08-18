@@ -257,12 +257,16 @@ correctly starts a new session rather than resuming into a mismatched prefix.
 | `200` | Chunk accepted / status / complete | Continue | No |
 | `201` | New session created | Continue | No |
 | `400` | Malformed headers or JSON | Fail permanently | Yes |
-| `403` | Uploads disabled, or session not owned by caller | Fail permanently | Yes |
-| `404` | Album or session unknown/expired | Evict mapping, re-init | No |
+| `403` | Uploads disabled on the album | Fail permanently | Yes |
+| `404` | Album or session unknown, expired, **or owned by someone else** | Evict mapping, re-init | No |
 | `409` | **Offset mismatch** — body carries true `received_bytes`. From `chunk` (wrong offset) or from `complete` (partial is short) | Re-seek, continue | **No** |
 | `413` | `total_size` exceeds `MAX_CONTENT_LENGTH`, or chunk overruns `total_size` | Fail permanently | Yes |
 | `422` | **Checksum mismatch** — chunk corrupt in transit | Retry the same chunk | **Yes** |
 | `429` | Quota or rate limit hit | Back off, surface to user | — |
+
+A session belonging to another user returns `404`, not `403`. The lookup is scoped by
+`user_id` and `album_id`, so a foreign handle simply does not resolve — and that is the right
+answer to give: a `403` would confirm to a stranger that the `upload_id` they hold is real.
 
 The `409` / `422` distinction is load-bearing. A `409` is *normal control flow* — it is how a
 resuming client discovers where to seek, and two tabs racing will produce them legitimately. A
@@ -331,6 +335,15 @@ see [#30](https://github.com/gfvandehei/PixelVault/issues/30).
 
 The first-chunk check is an optimisation only. A client controlling the first 8 MiB could pass it
 and fail the authoritative check — which is exactly what should happen.
+
+**Status codes differ between the two stages, deliberately.** The first-chunk rejection returns
+`400` with a plain `{"error": ...}` body, because the `results` envelope belongs to `complete` and
+no `Photo` is being reported on yet. The authoritative rejection at `complete` returns HTTP `200`
+with the error inside `results[0]`, matching the legacy endpoint so the client shares one handler.
+
+A failed first-chunk sniff does **not** discard the session. Freeing the quota slot immediately
+would invite an `init → 400 → 404 → init` loop against a retrying client; the TTL sweep reclaims it
+instead. A validation failure at `complete` *does* discard, because that path is terminal.
 
 ---
 
