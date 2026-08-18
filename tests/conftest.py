@@ -331,3 +331,45 @@ def photos(app):
                 for p in rows
             ]
     return _list
+
+
+@pytest.fixture
+def stored_bytes(upload_dir):
+    """Return a callable reading a committed media file back off disk."""
+    def _read(stored_filename):
+        return (upload_dir / stored_filename).read_bytes()
+    return _read
+
+
+@pytest.fixture
+def age_session(app):
+    """Return a callable that backdates a session so it reads as expired.
+
+    Time is moved by rewriting the row, not by sleeping: ``is_expired`` measures
+    ``updated_at`` against ``datetime.utcnow()``, so pushing the timestamps into the
+    past is indistinguishable from waiting out the TTL and costs nothing. Both
+    columns move, because ``expires_at`` falls back to ``created_at``.
+    """
+    from datetime import datetime, timedelta
+
+    def _age(upload_id, hours=TEST_TTL_HOURS + 1):
+        with app.app_context():
+            row = db.session.query(UploadSession).filter_by(upload_id=upload_id).one()
+            past = datetime.utcnow() - timedelta(hours=hours)
+            row.created_at = past
+            # Explicit assignment beats the column's onupdate=utcnow, which only fires
+            # for columns the flush did not already name.
+            row.updated_at = past
+            db.session.commit()
+    return _age
+
+
+@pytest.fixture
+def set_allow_upload(app):
+    """Return a callable flipping an album's ``allow_upload`` flag mid-test."""
+    def _set(album_id, flag):
+        with app.app_context():
+            row = db.session.query(Album).filter_by(id=album_id).one()
+            row.allow_upload = flag
+            db.session.commit()
+    return _set
