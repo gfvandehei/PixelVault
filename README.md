@@ -9,6 +9,7 @@ A self-hosted photo and video sharing platform. Create albums, share links, and 
 - **Upload links** — Share a link that lets others upload to your album
 - **View-only links** — Share a separate read-only link for browsing without upload access
 - **Drag-and-drop upload** — Batched uploads with progress tracking
+- **Chunked resumable uploads** — Large files upload in 8 MiB slices and resume after a dropped connection, page reload, or browser restart
 - **HEIC support** — Apple HEIC photos are converted to JPEG automatically on upload
 - **Thumbnail generation** — Automatic JPEG thumbnails for photos
 - **Lightbox gallery** — Browse photos full-screen with keyboard navigation and image preloading
@@ -79,9 +80,17 @@ Visit http://localhost:5000, log in as admin, and go to **Admin** in the nav to 
 
 ## Production Deployment (Docker + Nginx)
 
+> **Which nginx?** `conf/nginx.conf` configures the `nginx` service in
+> `docker/prod.docker-compose.yml`, which is gated behind `profiles: [nginx]` and does **not** start
+> unless you run `--profile nginx`. If you instead terminate TLS on a separate reverse proxy and
+> point it at the published `5000`, that proxy's config is the one that matters — see
+> [#28](https://github.com/gfvandehei/PixelVault/issues/28) and
+> [docs/upload_operations.md](docs/upload_operations.md), which maps every limit an upload passes
+> through and which hop to blame for each failure.
+
 ### 1. Set your domain in nginx.conf
 
-Edit `nginx.conf` and replace `your-domain.com` with your actual domain.
+Edit `conf/nginx.conf` and replace `your-domain.com` with your actual domain.
 
 ### 2. Obtain SSL certificates
 
@@ -121,6 +130,15 @@ Add to crontab:
 0 3 * * * certbot renew --quiet && docker compose restart nginx
 ```
 
+### 6. Check the path in front of the app
+
+If a CDN or proxy sits in front of the deployment, confirm its request-body limit before uploading
+anything large. Cloudflare's free and Pro plans reject bodies over 100 MB **at the edge**, which
+produces a silent stall with no HTTP status and nothing in the app logs. PixelVault uploads large
+files in `UPLOAD_CHUNK_SIZE` slices specifically to stay under that ceiling; set
+`TRUSTED_PROXY_COUNT` to the real number of proxy hops at the same time. Both are covered in
+[docs/upload_operations.md](docs/upload_operations.md).
+
 ---
 
 ## Environment Variables
@@ -138,6 +156,14 @@ Add to crontab:
 | `ADMIN_USERNAME`  | —          | Used by `flask create-admin` and `scripts/create_admin.py` |
 | `ADMIN_EMAIL`     | —          | Used by `flask create-admin` and `scripts/create_admin.py` |
 | `ADMIN_PASSWORD`  | —          | Used by `flask create-admin` and `scripts/create_admin.py` |
+| `UPLOAD_CHUNK_SIZE` | `8388608` (8 MiB) | Chunk size in bytes for large uploads. Keep it well below any proxy/CDN request-body cap in front of the app |
+| `UPLOAD_SESSION_TTL_HOURS` | `24` | How long an interrupted upload stays resumable before its partial file is reclaimed |
+| `MAX_CONCURRENT_UPLOADS_PER_USER` | `10` | Open upload sessions one user may hold at once |
+| `MAX_INFLIGHT_UPLOAD_MB_PER_USER` | `2048` | Total size, in MB, of one user's in-progress uploads. Bounds disk held by abandoned partials |
+| `TRUSTED_PROXY_COUNT` | `1` | Number of reverse proxies in front of the app that append to `X-Forwarded-For`. **Setting it higher than the true count lets clients spoof their IP** — when unsure, set it lower |
+
+See [docs/upload_operations.md](docs/upload_operations.md) for how to tune the upload variables and
+for a per-hop map of every limit an upload passes through.
 
 ---
 
@@ -156,7 +182,9 @@ PixelVault is designed with internet exposure in mind:
 | Session hijacking | HttpOnly, SameSite=Lax cookies; Secure flag when HTTPS=true |
 | Clickjacking | X-Frame-Options: SAMEORIGIN |
 | MIME sniffing | X-Content-Type-Options: nosniff |
-| Spam uploads | Rate limited at 60 uploads/hour per IP |
+| Spam uploads | Rate limited at 600 uploads/hour on the single-request path; chunked uploads are bounded by per-user session and byte quotas instead |
+| Disk exhaustion via abandoned uploads | Per-user caps on open sessions and in-flight bytes; partials older than the TTL are swept automatically |
+| Rate-limit evasion via spoofed IP | `ProxyFix` trusts exactly `TRUSTED_PROXY_COUNT` proxy hops |
 | Unauthorized access | Media files served through Flask auth check, not static |
 
 ### Recommended additional hardening for production:
@@ -164,7 +192,7 @@ PixelVault is designed with internet exposure in mind:
 - Use HTTPS (Let's Encrypt is free)
 - Set `HTTPS=true` in .env
 - Store `uploads/` on a separate volume or object storage
-- Regularly back up `instance/pixelvault.db`
+- Regularly back up `instance/pixelvault.db` and `uploads/`, excluding `uploads/partials/`
 - Monitor logs for abuse
 
 ---
@@ -189,6 +217,7 @@ pixelvault/
 │   ├── extensions.py         # db, login_manager, limiter instances
 │   ├── models.py             # User, AllowedEmail, Album, Photo (vanilla SQLAlchemy)
 │   ├── utils.py              # File handling, ZIP building, admin_required decorator
+│   ├── uploads.py            # Chunked upload sessions: quotas, chunk append, TTL sweep
 │   └── routes/
 │       ├── auth.py           # Register, login, logout
 │       ├── albums.py         # Dashboard, create/view/delete album, download
@@ -206,7 +235,9 @@ pixelvault/
 │   ├── album_upload.html     # Share page (upload or view-only depending on link)
 │   ├── admin.html            # Admin panel
 │   └── error.html
+├── docs/                     # Upload protocol, client, and operations references
 ├── uploads/                  # Created at runtime
+│   └── partials/             # In-progress chunked uploads (transient — exclude from backups)
 └── instance/                 # SQLite database (created at runtime)
 ```
 

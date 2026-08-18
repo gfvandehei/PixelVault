@@ -29,4 +29,29 @@ USER appuser
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "app:create_app()"]
+# ── Gunicorn ───────────────────────────────────────────────────────────────────
+# Worker class: sync workers occupy a worker for the *entire* request, body read
+# included, and only heartbeat between requests — so gunicorn's --timeout, which
+# is a worker-SILENCE timeout, fires mid-request and SIGKILLs the worker. The
+# connection dies with no HTTP status, which is indistinguishable from the
+# Cloudflare edge drop that #29 exists to fix. gthread keeps the arbiter's
+# heartbeat on a separate thread, so a long request no longer looks like a hung
+# worker.
+#
+# 2 workers x 4 threads = 8 concurrent requests. static/js/uploader.js uses
+# CONCURRENCY = 3, so 2 sync workers meant the third upload queued and the rest
+# of the site (thumbnails, /api) blocked behind it.
+#
+# --timeout 900 is still needed *after* chunking: no single 8 MiB chunk comes
+# close, but the `complete` step runs validate_file + save_file synchronously in
+# one request — HEIC decode, EXIF transpose, and 400x400 thumbnail generation
+# (src/pixelvault/utils.py) — and a very large image can exceed 120 s there.
+# --graceful-timeout 60 bounds how long a deploy waits for in-flight chunks
+# before it stops being a deploy and starts being an outage.
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", \
+     "--worker-class", "gthread", \
+     "--workers", "2", \
+     "--threads", "4", \
+     "--timeout", "900", \
+     "--graceful-timeout", "60", \
+     "app:create_app()"]

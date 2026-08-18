@@ -16,7 +16,7 @@ PixelVault is an invite-only, self-hosted photo album sharing application. Users
 | Image Processing | Pillow, pillow-heif (HEIC support) |
 | File Validation | python-magic (MIME type verification) |
 | Frontend | Jinja2 templates + vanilla JS |
-| Production Server | Gunicorn (2 workers) behind Nginx |
+| Production Server | Gunicorn (gthread, 2 workers x 4 threads) behind Nginx, behind Cloudflare |
 | Containerization | Docker + Docker Compose |
 
 ---
@@ -36,6 +36,7 @@ pixelvault/
 │   ├── extensions.py               # db, login_manager, limiter — initialized separately to avoid circular imports
 │   ├── models.py                   # SQLAlchemy models: User, Album, Photo, AllowedEmail
 │   ├── utils.py                    # File handling, ZIP building, shared decorators
+│   ├── uploads.py                  # Chunked upload sessions: quotas, chunk append, TTL sweep
 │   └── routes/
 │       ├── __init__.py             # Registers all route blueprints via register(app)
 │       ├── auth.py                 # /register, /login, /logout
@@ -45,6 +46,11 @@ pixelvault/
 │       ├── api.py                  # /api/* (JSON photo lists for gallery JS)
 │       └── admin.py                # /admin (allowed emails, user list)
 ├── templates/                      # Jinja2 HTML (base.html + 8 pages)
+├── docs/
+│   ├── database_schema.md          # Table/column reference
+│   ├── upload_protocol.md          # Chunked upload wire contract (client <-> server)
+│   ├── upload_client.md            # Client-side uploader internals
+│   └── upload_operations.md        # Deployment, per-hop limits, troubleshooting, tuning
 ├── docker/
 │   ├── Dockerfile.prod             # Production image (Python 3.13-slim)
 │   ├── Dockerfile.dev              # Dev image with hot reload
@@ -122,6 +128,13 @@ docker compose -f ./docker/prod.docker-compose.yml --env-file .env.prod up -d --
 | `PORT` | `5000` | no | Server port |
 | `ADMIN_USERNAME/EMAIL/PASSWORD` | — | no | Used only by `create-admin` CLI command |
 | `DATA_DIRECTORY` | — | no | Instance directory for database |
+| `UPLOAD_CHUNK_SIZE` | `8388608` (8 MiB) | no | Chunk size in bytes handed to the client at `init`. Must stay well under Cloudflare's 100 MB edge body cap |
+| `UPLOAD_SESSION_TTL_HOURS` | `24` | no | How long a partial upload stays resumable before the sweep reclaims its row and `.part` file |
+| `MAX_CONCURRENT_UPLOADS_PER_USER` | `10` | no | Open upload sessions one user may hold at once; enforced at `init` |
+| `MAX_INFLIGHT_UPLOAD_MB_PER_USER` | `2048` | no | Total declared bytes across a user's open sessions, in MB. Read into `MAX_INFLIGHT_UPLOAD_BYTES_PER_USER` |
+| `TRUSTED_PROXY_COUNT` | `1` | no | Proxies appending to `X-Forwarded-For` ahead of Flask; consumed by `ProxyFix`. **Setting it too high lets clients spoof their rate-limit identity** — when unsure, set it too low |
+
+The last five are documented in depth in [docs/upload_operations.md](docs/upload_operations.md).
 
 ---
 
@@ -143,6 +156,23 @@ No Alembic — migrations are handled by `_run_migrations()` in `__init__.py`. I
 - Thumbnails are 400×400 JPEG (quality 85), auto-generated at upload time.
 - Files are served through authenticated Flask endpoints (`/media/<filename>`), never as static files directly.
 
+### Chunked Resumable Uploads
+Files above `UPLOAD_CHUNK_SIZE` (8 MiB) upload as a sequence of chunk requests rather than one
+large body, because Cloudflare's free plan rejects request bodies over 100 MB at the edge — the
+origin never sees the request, so the browser observes a silent stall with nothing in the app logs.
+Chunks append in place to `UPLOAD_FOLDER/partials/<upload_id>.part`; the transfer is resumable
+within `UPLOAD_SESSION_TTL_HOURS`. Files at or below the threshold keep the legacy single-request
+path unchanged.
+
+- Wire contract (endpoints, status codes, headers): [docs/upload_protocol.md](docs/upload_protocol.md)
+- Client internals: [docs/upload_client.md](docs/upload_client.md)
+- Deployment, per-hop limits, troubleshooting, tuning: [docs/upload_operations.md](docs/upload_operations.md)
+
+Server-side session logic lives in [src/pixelvault/uploads.py](src/pixelvault/uploads.py), separate
+from the routes. The `upload_session` table is created by `_run_migrations()` on boot — no manual
+step. Abandoned partials are swept opportunistically inside `init` and on demand via
+`flask cleanup-uploads`.
+
 ### Share Link System
 Each `Album` has two tokens:
 - `token` → `/share/<token>` — upload link (guests can browse & upload)
@@ -155,7 +185,7 @@ Both links respect the album-level `allow_upload` toggle.
 |---|---|
 | Register | 10/hour |
 | Login | 20/hour |
-| Upload | 60/hour |
+| Upload (legacy single-request) | 600/hour |
 | Album create | 30/hour |
 | Admin email add | 60/hour |
 
@@ -167,6 +197,12 @@ Both links respect the album-level `allow_upload` toggle.
 - Sessions use `HttpOnly=True`, `SameSite=Lax`, and `Secure=True` when `HTTPS=true`.
 - Security headers set on every response: `X-Frame-Options`, `X-Content-Type-Options`, HSTS.
 - bcrypt uses 600,000 rounds — password operations are intentionally slow.
+- `ProxyFix` is wrapped around the WSGI app with `x_for=TRUSTED_PROXY_COUNT`. **Never set that
+  higher than the real number of proxies appending to `X-Forwarded-For`** — a client's own header
+  then survives into the trusted region and it can pick its own rate-limit identity.
+- Chunked uploads are bounded by DB-backed per-user quotas (`MAX_CONCURRENT_UPLOADS_PER_USER`,
+  `MAX_INFLIGHT_UPLOAD_MB_PER_USER`), not by the rate limiter — limits live in `memory://` per
+  worker and reset on every deploy, so they are damping, not a defence.
 
 ---
 
@@ -178,6 +214,7 @@ Both links respect the album-level `allow_upload` toggle.
 | `AllowedEmail` | `email` (whitelist for registration) |
 | `Album` | `name`, `token`, `view_token`, `allow_upload`, `owner_id` |
 | `Photo` | `stored_filename` (UUID), `original_filename`, `mime_type`, `album_id`, `uploader_id`, `is_thumbnail` |
+| `UploadSession` | `upload_id` (UUID, the resume handle), `client_key`, `total_size`, `received_bytes`, `album_id`, `user_id`, `updated_at` — unique on `(user_id, album_id, client_key)` |
 
 ---
 
@@ -203,3 +240,10 @@ No automated test suite exists yet. Testing is currently manual:
 | `scripts/create_admin.py` | Create admin without Flask CLI (useful in CI/Docker) |
 | `scripts/migrate_heic.py` | Convert existing HEIC uploads to JPEG, updates DB, regenerates thumbnails |
 | `scripts/migrate_thumbnails_orientation.py` | Retroactively fix EXIF orientation on stored thumbnails |
+
+## Flask CLI Commands
+
+| Command | Purpose |
+|---|---|
+| `flask --app app create-admin` | Create the admin user from `ADMIN_*` env vars |
+| `flask --app app cleanup-uploads` | Delete upload sessions idle past `UPLOAD_SESSION_TTL_HOURS` and their `.part` files |
