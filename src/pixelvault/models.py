@@ -1,5 +1,6 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -13,7 +14,7 @@ from sqlalchemy.orm import (
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, ForeignKey, UniqueConstraint
 )
-from .config import ALLOWED_PHOTO_TYPES, ALLOWED_VIDEO_TYPES
+from .config import ALLOWED_PHOTO_TYPES, ALLOWED_VIDEO_TYPES, UPLOAD_PARTIALS_SUBDIR
 
 class Base(DeclarativeBase):
     pass
@@ -117,3 +118,86 @@ class Photo(Base):
                 return f"{size:.1f} {unit}"
             size /= 1024
         return f"{size:.1f} TB"
+
+
+class UploadSession(Base):
+    """A large file mid-flight, uploaded in chunks and resumable across drops and reloads.
+
+    One row exists per file being streamed in slices. The row is the authority on
+    where the transfer stands: ``received_bytes`` counts the bytes of the ``.part``
+    file on disk that are known-good, and every chunk is appended at exactly that
+    offset. It is both the resume cursor handed back to a returning client and the
+    integrity anchor a chunk append truncates back to.
+
+    Rows are short-lived. ``complete`` deletes one after turning the partial into a
+    ``Photo``; the sweep in ``pixelvault.uploads`` deletes any that fall silent for
+    longer than ``UPLOAD_SESSION_TTL_HOURS``. See docs/upload_protocol.md for the
+    wire contract these fields back.
+    """
+    __tablename__ = 'upload_session'
+    # Makes `init` idempotent: re-picking the same file returns the session already
+    # in flight and its true offset instead of orphaning the .part and starting over.
+    __table_args__ = (UniqueConstraint('user_id', 'album_id', 'client_key'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    upload_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, default=lambda: str(uuid.uuid4()))
+    album_id: Mapped[int] = mapped_column(Integer, ForeignKey('album.id'), nullable=False)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey('user.id'), nullable=False)
+    client_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(256), nullable=False)
+    total_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    received_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def is_complete(self):
+        """Return True once every declared byte has landed and the partial is ready to commit."""
+        return self.received_bytes >= self.total_size
+
+    @property
+    def remaining_bytes(self):
+        """Return how many bytes are still outstanding, never negative."""
+        return max(0, self.total_size - self.received_bytes)
+
+    @property
+    def progress_percent(self):
+        """Return transfer progress as a percentage, for logging and status responses."""
+        if self.total_size <= 0:
+            return 0.0
+        return round(100.0 * self.received_bytes / self.total_size, 1)
+
+    def expires_at(self, ttl_hours):
+        """Return the moment this session stops being resumable, measured from its last chunk."""
+        return (self.updated_at or self.created_at) + timedelta(hours=ttl_hours)
+
+    def is_expired(self, ttl_hours, now=None):
+        """Return True if the session has been silent for longer than the TTL and may be swept.
+
+        Measured from ``updated_at`` so an upload that is still making progress never
+        expires under a slow client, only one that has genuinely been abandoned.
+        """
+        return (now or datetime.utcnow()) >= self.expires_at(ttl_hours)
+
+    def partial_path(self, upload_dir):
+        """Return the on-disk path of this session's ``.part`` file.
+
+        Named from ``upload_id`` rather than anything the client supplied, so no
+        request can steer a write outside the partials directory.
+        """
+        return Path(upload_dir) / UPLOAD_PARTIALS_SUBDIR / f"{self.upload_id}.part"
+
+    def accepts_chunk_at(self, offset):
+        """Return True if a chunk declaring this start offset lines up with the resume cursor.
+
+        A mismatch is normal control flow, not an error: it is how a resuming or
+        racing client discovers where to seek (409, see docs/upload_protocol.md §8).
+        """
+        return offset == self.received_bytes
+
+    def would_overrun(self, chunk_length):
+        """Return True if accepting a chunk of this size would push past the declared total.
+
+        Without this check a client can stream unbounded bytes to disk by understating
+        ``total_size`` at init, since MAX_CONTENT_LENGTH only bounds a single chunk.
+        """
+        return self.received_bytes + chunk_length > self.total_size

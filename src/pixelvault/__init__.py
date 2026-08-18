@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 
 from flask import Flask, render_template
+from werkzeug.middleware.proxy_fix import ProxyFix
 import sys
 
 from .extensions import db, login_manager, limiter
@@ -26,6 +27,22 @@ def create_app():
     )
     print(TEMPLATES_FOLDER, file=sys.stderr)
     print(SQLALCHEMY_DATABASE_URI, file=sys.stderr)
+
+    # ── Reverse proxy ──────────────────────────────────────────────────────
+    # Requests arrive as Cloudflare -> VPS nginx -> published :5000, so the socket
+    # peer is always the docker gateway and, without this, every visitor in the world
+    # shares one rate-limit bucket (#30). ProxyFix rewrites REMOTE_ADDR from the
+    # trailing entries of X-Forwarded-For.
+    #
+    # The hop count is configurable, not hard-coded, because the true value depends on
+    # the VPS nginx config still being written in #28 and differs for anyone
+    # self-hosting behind another topology. It must be set no higher than the number of
+    # proxies that actually append to the header: too high and the client's own
+    # X-Forwarded-For survives into the trusted region, letting it name any address it
+    # likes and so pick which rate-limit identity it is charged under. See
+    # TRUSTED_PROXY_COUNT in config.py.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_COUNT)
+
     # ── Configuration ──────────────────────────────────────────────────────
     app.config['SECRET_KEY'] = SECRET_KEY
     app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
@@ -88,6 +105,14 @@ def create_app():
         from .models import User
         utils.create_admin(ADMIN_USERNAME, ADMIN_EMAIL, ADMIN_PASSWORD, db.session, click.echo)
 
+    @app.cli.command('cleanup-uploads')
+    def cleanup_uploads_command():
+        """Delete upload sessions idle past UPLOAD_SESSION_TTL_HOURS and their .part files."""
+        import click
+        from .uploads import sweep_expired_sessions
+        removed = sweep_expired_sessions(db.session, UPLOAD_FOLDER, UPLOAD_SESSION_TTL_HOURS)
+        click.echo(f"Reclaimed {removed} abandoned upload(s).")
+
     # ── Database init & migrations ─────────────────────────────────────────
     with app.app_context():
         db.create_all()
@@ -117,6 +142,19 @@ def _run_migrations():
             )""",
             "ALTER TABLE album_access ADD COLUMN access_type VARCHAR(10) NOT NULL DEFAULT 'upload'",
             "ALTER TABLE photo ADD COLUMN taken_at DATETIME",
+            """CREATE TABLE IF NOT EXISTS upload_session (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upload_id VARCHAR(36) NOT NULL UNIQUE,
+                album_id INTEGER NOT NULL REFERENCES album(id),
+                user_id INTEGER NOT NULL REFERENCES user(id),
+                client_key VARCHAR(64) NOT NULL,
+                original_filename VARCHAR(256) NOT NULL,
+                total_size INTEGER NOT NULL,
+                received_bytes INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, album_id, client_key)
+            )""",
         ]:
             try:
                 conn.execute(db.text(stmt))
