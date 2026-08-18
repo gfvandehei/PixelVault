@@ -9,6 +9,12 @@
  * The 'processing' phase matters: the server converts HEIC and builds
  * thumbnails after the last byte lands, so 100% sent is not 100% complete.
  *
+ * A watchdog covers the two ways an upload can look alive while being dead:
+ * a connection that hangs mid-transfer (XHR fires no event for this, so idle
+ * time between progress events is measured instead), and a 'processing' phase
+ * that never returns. Note that xhr.timeout is deliberately NOT used — it caps
+ * total request duration, which would kill legitimately slow large videos.
+ *
  * Used by templates/album_upload.html and templates/album_view.html.
  */
 (function (global) {
@@ -19,6 +25,10 @@
   var RATE_MIN_ELAPSED_MS = 500;// don't show a rate before this much has elapsed
   var RATE_MIN_BYTES = 1048576; // ...or for files smaller than this (1 MB)
   var MAX_AUTO_RETRIES = 1;     // automatic retries on network failure
+  var WATCHDOG_MS = 1000;       // how often in-flight items are re-checked
+  var STALL_WARN_MS = 20000;    // no bytes moved this long -> warn, offer retry
+  var STALL_FAIL_MS = 90000;    // ...still nothing -> abort so the row is retryable
+  var PROCESS_WARN_MS = 60000;  // server-side processing running unusually long
 
   function humanSize(bytes) {
     var units = ['B', 'KB', 'MB', 'GB'];
@@ -33,6 +43,12 @@
     var m = Math.floor(seconds / 60);
     if (m < 60) return m + 'm ' + Math.round(seconds % 60) + 's left';
     return Math.floor(m / 60) + 'h ' + (m % 60) + 'm left';
+  }
+
+  function humanDuration(ms) {
+    var s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
   }
 
   /* Map a transport-level failure to something the user can act on. The
@@ -70,6 +86,7 @@
 
     this.items = [];
     this.running = false;
+    this._watchdog = null;
 
     this._bindInputs();
     this._syncSubmit();
@@ -117,6 +134,10 @@
         retries: 0,
         error: null,
         xhr: null,
+        lastProgressAt: 0,
+        processingAt: 0,
+        stalled: false,
+        stallAbort: false,
       };
       self._buildRow(item);
       self.items.push(item);
@@ -183,11 +204,18 @@
   };
 
   Uploader.prototype.retryItem = function (item) {
-    if (item.status !== 'error') return;
+    if (item.status !== 'error' && !item.stalled) return;
+    // Restarting a stalled transfer: drop the dead socket first. The abort is
+    // user-driven, so it must not be reported as a stall failure.
+    if (item.stalled && item.xhr) {
+      item.stallAbort = false;
+      item.xhr.abort();
+    }
     item.retries = 0;
     item.error = null;
     this._setStatus(item, 'pending', 'Pending');
     var self = this;
+    this._startWatchdog();
     this._uploadOne(item).then(function () {
       self._renderTotal();
       self._maybeFinish();
@@ -196,6 +224,7 @@
 
   Uploader.prototype._setStatus = function (item, status, text) {
     item.status = status;
+    item.stalled = false;
     item.nodes.root.className = 'pv-up-item is-' + status;
     item.nodes.status.className = 'pv-up-status is-' + status;
     item.nodes.status.textContent = text;
@@ -217,6 +246,8 @@
   Uploader.prototype._onProgress = function (item, loaded, total) {
     item.loaded = loaded;
     var now = Date.now();
+    item.lastProgressAt = now;
+    if (item.stalled) this._clearStall(item);
 
     item.samples.push({ t: now, loaded: loaded });
     while (item.samples.length > 2 && now - item.samples[0].t > RATE_WINDOW_MS) {
@@ -240,10 +271,73 @@
     this._renderTotal();
   };
 
+  Uploader.prototype._markStall = function (item, idleMs) {
+    item.stalled = true;
+    item.nodes.root.classList.add('is-stalled');
+    item.nodes.status.classList.add('is-stalled');
+    item.nodes.status.textContent = 'Stalled';
+    item.nodes.retry.style.display = '';
+    item.nodes.meta.textContent =
+      'No data sent for ' + humanDuration(idleMs) + ' — retry, or check your connection';
+  };
+
+  Uploader.prototype._clearStall = function (item) {
+    item.stalled = false;
+    item.nodes.root.classList.remove('is-stalled');
+    item.nodes.status.classList.remove('is-stalled');
+    item.nodes.retry.style.display = 'none';
+  };
+
+  /* Runs while anything is in flight. Uploading rows are judged on idle time
+     since the last progress event; processing rows get a live elapsed counter
+     so a long server-side conversion reads as working, not frozen. */
+  Uploader.prototype._checkStalls = function () {
+    var self = this;
+    var now = Date.now();
+    var busy = false;
+
+    this.items.forEach(function (item) {
+      if (item.status === 'uploading') {
+        busy = true;
+        var idle = now - item.lastProgressAt;
+        if (idle >= STALL_FAIL_MS) {
+          item.stallAbort = true;
+          if (item.xhr) item.xhr.abort();
+        } else if (idle >= STALL_WARN_MS) {
+          self._markStall(item, idle);
+        }
+      } else if (item.status === 'processing') {
+        busy = true;
+        var waited = now - item.processingAt;
+        item.nodes.meta.textContent = waited >= PROCESS_WARN_MS
+          ? 'Still processing after ' + humanDuration(waited) + ' — large videos take a while'
+          : 'Processing for ' + humanDuration(waited);
+      }
+    });
+
+    if (!busy) this._stopWatchdog();
+  };
+
+  Uploader.prototype._startWatchdog = function () {
+    if (this._watchdog) return;
+    var self = this;
+    this._watchdog = setInterval(function () { self._checkStalls(); }, WATCHDOG_MS);
+  };
+
+  Uploader.prototype._stopWatchdog = function () {
+    if (!this._watchdog) return;
+    clearInterval(this._watchdog);
+    this._watchdog = null;
+  };
+
   Uploader.prototype._uploadOne = function (item) {
     var self = this;
 
     return new Promise(function (resolve) {
+      // Started here rather than only in start(): the auto-retry path re-enters
+      // _uploadOne after a gap in which the watchdog may have stopped itself.
+      self._startWatchdog();
+
       var form = new FormData();
       form.append('files', item.file);
 
@@ -252,6 +346,9 @@
       item.loaded = 0;
       item.samples = [];
       item.startedAt = Date.now();
+      item.lastProgressAt = item.startedAt;
+      item.processingAt = 0;
+      item.stallAbort = false;
       self._setStatus(item, 'uploading', '0%');
       item.nodes.bar.style.width = '0%';
 
@@ -265,6 +362,7 @@
       // Body fully sent; the server is now converting/thumbnailing.
       xhr.upload.onload = function () {
         item.loaded = item.file.size;
+        item.processingAt = Date.now();
         self._setStatus(item, 'processing', 'Processing…');
         self._renderTotal();
       };
@@ -307,7 +405,14 @@
 
       xhr.onerror = function () { fail('Network error', true); };
       xhr.ontimeout = function () { fail('Timed out', true); };
-      xhr.onabort = function () { resolve(); };
+      xhr.onabort = function () {
+        if (item.stallAbort) {
+          item.stallAbort = false;
+          fail('Stalled — no data for ' + humanDuration(STALL_FAIL_MS), false);
+          return;
+        }
+        resolve();
+      };
 
       xhr.send(form);
     });
@@ -354,6 +459,7 @@
     var self = this;
     this.running = true;
     this._syncSubmit();
+    this._startWatchdog();
     if (this.totalWrap) this.totalWrap.style.display = 'block';
 
     var next = 0;
@@ -376,6 +482,7 @@
   };
 
   Uploader.prototype.reset = function () {
+    this._stopWatchdog();
     this.items.forEach(function (it) { if (it.xhr) it.xhr.abort(); });
     this.items = [];
     this.listEl.innerHTML = '';

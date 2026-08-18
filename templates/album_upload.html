@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/uploader.css') }}?v=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/uploader.css') }}?v=2">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     img, video { max-width: 100%; height: auto; }
@@ -555,7 +555,7 @@
   Powered by <a href="/">PixelVault</a>
 </div>
 
-<script src="{{ url_for('static', filename='js/uploader.js') }}?v=1"></script>
+<script src="{{ url_for('static', filename='js/uploader.js') }}?v=2"></script>
 <script>
 const UPLOAD_URL = {{ upload_url|tojson }};
 const API_URL = {{ api_url|tojson }};

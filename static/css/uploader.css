@@ -53,6 +53,9 @@
 .pv-up-status.is-processing { color: var(--amber); }
 .pv-up-status.is-done       { color: #5dba80; }
 .pv-up-status.is-error      { color: #e87070; }
+/* Must follow .is-uploading: a stalled row keeps that class and this wins on
+   source order, not specificity. */
+.pv-up-status.is-stalled    { color: #e87070; }
 
 /* Per-file progress bar — only rendered while a file is in flight. */
 .pv-up-bar-wrap {
@@ -97,7 +100,17 @@
   display: none;
 }
 
-.pv-up-item.is-uploading .pv-up-meta { display: block; }
+.pv-up-item.is-uploading .pv-up-meta,
+.pv-up-item.is-processing .pv-up-meta,
+.pv-up-item.is-stalled .pv-up-meta { display: block; }
+
+/* Stalled: freeze the pulse and go red so it is not mistaken for progress. */
+.pv-up-item.is-stalled { border-color: #e87070; }
+
+.pv-up-item.is-stalled .pv-up-bar {
+  background: #e87070;
+  animation: none;
+}
 
 .pv-up-btn {
   background: none;
