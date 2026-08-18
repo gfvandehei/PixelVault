@@ -195,7 +195,8 @@ flowchart TD
 | `409` | Re-seek to `body.received_bytes` and resume sending chunks. **Costs no retry budget.** `complete` can answer this too — the server refuses to assemble unless `received_bytes == total_size`, so a chunk we counted as accepted but that did not survive surfaces here. | Normal control flow — it is how a resuming client discovers the true offset, and two tabs racing one session produce it legitimately. Capped at `MAX_OFFSET_RESYNCS` consecutive occurrences so a server stuck at one offset is a failure, not a livelock. |
 | `422` | Retry the *same* chunk at the *same* offset. Costs one retry. | The bytes arrived corrupt. Nothing was written, so the offset is still valid. |
 | `404` | Evict the mapping, `init` a fresh session, restart from zero. Once. | The session expired or was swept; the `.part` file went with it, so there is nothing to seek to. |
-| `429` | Retry after `RATE_LIMIT_DELAY_MS`, then surface. | Only `422` is charged against the limiter server-side, so a `429` here means real pressure. |
+| `429` | Retry after `RATE_LIMIT_DELAY_MS`, then surface. | Every non-`200` is charged server-side against a 600/hour failure budget; successes are free. A `429` therefore means a run of genuine refusals, not upload volume. |
+| `401` | Surface "Session expired — reload the page". | Reachable on the chunked endpoints: an anonymous or expired-session request returns JSON `401` rather than redirecting to the HTML login page, which XHR would otherwise follow transparently and report as a bare "Upload failed". |
 | `5xx` / network | Retry the current step. | May be transient. |
 | other `4xx` | Fail permanently. | Will fail identically on retry. |
 

@@ -205,19 +205,36 @@ def test_an_anonymous_caller_cannot_finish_a_logged_in_users_upload(
     assert photos(album.id) == []
 
 
-@pytest.mark.xfail(
-    reason="BUG: login_manager.login_view is set to the HTML 'login' route, so an "
-           "expired session on a chunked endpoint answers 302 -> /login instead of "
-           "401. XHR follows the redirect transparently, so uploader.js sees HTTP 200 "
-           "with an HTML login page, finds no `results` array, and reports the generic "
-           "'Upload failed' — its case 401 'Session expired — reload the page' branch "
-           "(static/js/uploader.js:92) is unreachable for these routes.",
-    strict=True,
-)
 def test_an_anonymous_caller_gets_401_rather_than_a_redirect_to_the_login_page(
         anon_client, album, small_jpeg):
+    """A 302 to the HTML login page is invisible to XHR — it follows it and reports
+    HTTP 200 with a login page as the body, so uploader.js's "Session expired — reload
+    the page" branch never runs. Mid-upload expiry is the realistic trigger."""
     anon = ProtocolClient(anon_client, album.token)
 
     response = anon.init_for("holiday.jpg", small_jpeg)
 
     assert response.status_code == 401
+
+
+def test_a_browser_page_load_still_gets_the_login_redirect(anon_client):
+    """The 401 is for callers that speak JSON. A person following a link to a page
+    still gets sent to the login form, with ``next`` set so they land where they meant
+    to — regressing that would trade one bad experience for another."""
+    response = anon_client.get("/dashboard")
+
+    assert response.status_code == 302
+    assert "/login" in response.headers["Location"]
+
+
+def test_a_chunk_from_a_logged_out_client_is_a_readable_401(anon_client, album,
+                                                            small_jpeg):
+    """The realistic trigger: the login session expires mid-transfer, so the 401 has
+    to reach uploader.js on the chunk endpoint too, not just on init."""
+    anon = ProtocolClient(anon_client, album.token)
+
+    response = anon.chunk("00000000-0000-0000-0000-000000000000", 0, small_jpeg)
+
+    assert response.status_code == 401
+    assert response.mimetype == "application/json"
+    assert "error" in response.get_json()

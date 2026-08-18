@@ -6,8 +6,9 @@ from werkzeug.utils import secure_filename
 
 from ..extensions import db, limiter
 from ..models import Album, Photo, AlbumAccess, User
+from ..uploads import discard_sessions_for_album
 from ..utils import delete_photo_files, build_album_zip
-from flask import send_file
+from flask import current_app, send_file
 from sqlalchemy.exc import NoResultFound
 
 
@@ -243,6 +244,13 @@ def register(app):
             abort(403)
         for photo in album.photos:
             delete_photo_files(photo)
+        # Uploads still in flight go with the album. There is no FK cascade to lean on
+        # — SQLite runs with foreign keys off — and a surviving session is not merely
+        # untidy: it can never complete (its share token stops resolving) yet it keeps
+        # charging its uploader a concurrency slot and its whole declared size against
+        # the in-flight byte quota until the TTL sweep notices, a day later.
+        discard_sessions_for_album(db.session, album.id,
+                                   current_app.config['UPLOAD_FOLDER'])
         db.session.delete(album)
         db.session.commit()
         flash('Album deleted.', 'info')

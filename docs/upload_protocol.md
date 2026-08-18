@@ -196,13 +196,21 @@ payload is a single anonymous blob.
 Content-Type:    application/octet-stream
 Content-Length:  8388608
 X-Upload-Offset: 251658240      // byte offset this chunk begins at
-X-Chunk-SHA256:  b7e2…          // 64 lowercase hex chars, digest of THIS chunk only
+X-Chunk-SHA256:  b7e2…          // 64 lowercase hex chars, digest of THIS chunk only. MANDATORY
 ```
 
 ```jsonc
 // 200 OK
 { "received_bytes": 260046848 }
 ```
+
+`X-Chunk-SHA256` is **required**, not optional. A chunk whose digest header is absent or blank is
+refused `400`, with nothing written and the cursor unmoved. Treating a missing digest as "skip
+verification" would make the integrity check opt-out by omission — and because an unverified chunk
+can never produce a `422`, it would also be a free bypass of the rate-limit charge in §8.
+
+The offset check runs **before the body is read or sniffed**, so a mis-aimed chunk is refused on two
+header values and the session row alone. Nothing is buffered and libmagic never runs.
 
 ### 6.4 `POST /share/<token>/upload/complete/<upload_id>`
 
@@ -256,10 +264,10 @@ correctly starts a new session rather than resuming into a mismatched prefix.
 |---|---|---|---|
 | `200` | Chunk accepted / status / complete | Continue | No |
 | `201` | New session created | Continue | No |
-| `400` | Malformed headers or JSON | Fail permanently | Yes |
+| `400` | Malformed headers or JSON, or a missing/blank `X-Chunk-SHA256` | Fail permanently | Yes |
 | `403` | Uploads disabled on the album | Fail permanently | Yes |
-| `404` | Album or session unknown, expired, **or owned by someone else** | Evict mapping, re-init | No |
-| `409` | **Offset mismatch** — body carries true `received_bytes`. From `chunk` (wrong offset) or from `complete` (partial is short) | Re-seek, continue | **No** |
+| `404` | Album or session unknown, expired, **or owned by someone else** | Evict mapping, re-init | Yes |
+| `409` | **Offset mismatch** — body carries true `received_bytes`. From `chunk` (wrong offset) or from `complete` (partial is short) | Re-seek, continue | Yes |
 | `413` | `total_size` exceeds `MAX_CONTENT_LENGTH`, or chunk overruns `total_size` | Fail permanently | Yes |
 | `422` | **Checksum mismatch** — chunk corrupt in transit | Retry the same chunk | **Yes** |
 | `429` | Quota or rate limit hit | Back off, surface to user | — |
@@ -270,15 +278,27 @@ answer to give: a `403` would confirm to a stranger that the `upload_id` they ho
 
 The `409` / `422` distinction is load-bearing. A `409` is *normal control flow* — it is how a
 resuming client discovers where to seek, and two tabs racing will produce them legitimately. A
-`422` means bytes arrived corrupted or forged. Only the latter is charged against the rate limit:
+`422` means bytes arrived corrupted or forged.
+
+**Successes are free; every refusal is charged.**
 
 ```python
-@limiter.limit("60 per hour", deduct_when=lambda r: r.status_code == 422)
+@limiter.limit("600 per hour", deduct_when=lambda r: r.status_code != 200)
 ```
 
 A plain count limit cannot work here: one 500 MB file is 63 requests, so request count no longer
-correlates with cost. See #29 for the full reasoning, including the bad-checksum replay attack that
-rules out simply exempting the endpoint.
+correlates with cost. Charging only `422` does not work either — that leaves `409`, `413`, `400` and
+`404` as free, infinitely repeatable sinks, each costing a full 8 MiB body read. A mis-aimed offset
+replayed in a loop was measured at 3200 MiB read in 7.1 s with the limiter counter still at zero.
+
+The budget is sized **for failures, not for traffic**. A legitimate 500 MB upload spends zero; a
+resume spends one `409`; an hour on a bad network spends a few dozen `422`s. 600 is roughly ten times
+the worst honest hour, and low enough that no refusal path is worth abusing.
+
+It has to be that generous because flask-limiter *checks* the limit on entry to every request
+whether or not it deducts. A budget small enough to be spent on failures would therefore start
+rejecting the **good** chunks too: at 60, sixty bad-network checksum failures locked a user out of
+uploading for an hour.
 
 ---
 
@@ -290,20 +310,39 @@ discarded rather than duplicated. This makes the on-disk length and the DB count
 a repair pass.
 
 ```mermaid
-flowchart LR
-    A[chunk arrives] --> B{offset ==<br/>received_bytes?}
-    B -->|no| C[409 + true offset]
-    B -->|yes| D{sha256 matches?}
-    D -->|no| E[422, nothing written]
+flowchart TD
+    A["chunk arrives (headers only)"] --> B{"offset ==<br/>received_bytes?"}
+    B -->|no| C["409 + true offset<br/>body never read"]
+    B -->|yes| R["read body"]
+    R --> P{"X-Chunk-SHA256<br/>present?"}
+    P -->|no| Q["400, nothing written"]
+    P -->|yes| L["acquire flock on .part"]
+    L --> B2{"offset still<br/>matches?"}
+    B2 -->|no| C
+    B2 -->|yes| D{"sha256 matches?"}
+    D -->|no| E["422, nothing written"]
     D -->|yes| F["truncate to received_bytes"]
-    F --> G[append bytes]
-    G --> H[UPDATE received_bytes]
-    H --> I[200]
+    F --> G["append bytes"]
+    G --> S["fsync"]
+    S --> H["UPDATE received_bytes"]
+    H --> I["200, release flock"]
 ```
 
-Order matters: truncate-then-append must precede the DB update, so a crash between the two leaves
-`received_bytes` *behind* the file length. The next chunk truncates the excess away. The reverse
-order would leave the counter ahead of the data and corrupt the file irrecoverably.
+Order matters: truncate-append-**fsync** must precede the DB update, so a crash between the two
+leaves `received_bytes` *behind* the file length. The next chunk truncates the excess away. The
+reverse order would leave the counter ahead of the data and corrupt the file irrecoverably — and the
+fsync is what makes "behind" true, since buffered writes lost in a crash would put the counter ahead.
+
+**The whole sequence runs under an exclusive `flock` on the `.part` file**, with the offset
+re-checked after the lock is taken. Without it, concurrent chunks at the same offset all pass the
+check, all write, and all return `200` — leaving every client but one holding a success receipt for
+bytes that were overwritten. Six concurrent 8 MiB chunks at offset 0 were measured returning
+`{200: 6}` with one payload on disk; under the lock they return exactly one `200` and five `409`s.
+`flock` is an open-file-description lock, so it serialises gthread threads and gunicorn worker
+processes alike.
+
+The offset check runs twice on purpose: once before the body is read, to refuse a mis-aimed chunk
+without buffering 8 MiB, and once under the lock, where it is the authority.
 
 ---
 
@@ -315,14 +354,17 @@ Chunking removes protections the app currently relies on. All four are mandatory
 |---|---|---|
 | `total_size <= MAX_CONTENT_LENGTH` | `init` | `MAX_CONTENT_LENGTH` is per-request and each request is now 8 MiB — it no longer bounds an upload |
 | `received_bytes + len(chunk) <= total_size` | every chunk | Without it a client can stream unbounded bytes to disk by lying at init |
-| Open sessions per user (10), in-flight bytes per user | `init` | Bounds abandoned partials |
+| Open sessions per user (10), in-flight bytes per user | `init` | Bounds abandoned partials. Enforced by a conditional `INSERT ... SELECT ... WHERE` so the check and the insert cannot interleave — a plain check-then-insert was measured admitting 16 sessions against a cap of 10 |
 | Per-route `request.max_content_length` | `chunk` | The chunk endpoint has no business accepting 500 MB |
+| Session discard on album delete | `albums.py` | Deleting an album reclaims its in-flight sessions and `.part` files; an ORM cascade would drop the rows and leave the files as invisible orphans |
+| Session discard on a failed `complete` | `complete` | A store that raises must not strand the partial and its quota slot for the full TTL |
 
 The DB-backed quotas are the **load-bearing** defence. The rate limiter is secondary damping:
 `storage_uri="memory://"` with 2 workers means limits are per-process and reset on every deploy.
 
-Per-user quotas depend on the limiter having a per-user key, which it does not currently have —
-see [#30](https://github.com/gfvandehei/PixelVault/issues/30).
+Per-user quotas depend on the limiter having a per-user key, added in
+[#30](https://github.com/gfvandehei/PixelVault/issues/30): authenticated routes key on
+`user:<id>`, which no header can spoof.
 
 ---
 

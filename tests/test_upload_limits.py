@@ -7,10 +7,17 @@ forced them apart: once one file is sixty requests, request count stopped
 correlating with cost, so the limiter had to stop charging for the traffic the
 feature exists to produce.
 
-The asymmetry in ``upload_chunk`` — ``deduct_when=lambda r: r.status_code == 422``
-— is the piece most likely to regress silently, because charging for 409s breaks
-nothing that a happy-path test would notice. It only breaks resumption, and only
-for the clients that need it most. Hence the flood tests below.
+The chunk endpoint charges the limiter for every response that is not a 200, and
+for nothing else. That rule replaced a 422-only charge which was wrong in both
+directions at once: every other refusal was an unmetered 8 MiB sink, and the limit
+was still *checked* on requests it never deducted, so sixty bad-network checksum
+failures threw a 429 at every chunk that user sent for the next hour.
+
+Both directions are easy to regress silently, because neither breaks anything a
+happy-path test would notice — one only breaks under abuse, the other only breaks
+for the clients already having a bad day. Hence the flood tests below, which pin
+the budget from both sides: refusals are bounded, and the number that bounds them
+is far above anything an honest client produces.
 
 Sizes come from ``conftest``: an 8 MB request ceiling over a 4 MB in-flight quota
 over 3 concurrent sessions, chosen so each limit can be tripped without tripping
@@ -25,32 +32,113 @@ from tests.protocol import client_key_for
 
 MB = 1024 * 1024
 
-#: The chunk endpoint's own limit. Floods below must comfortably exceed it.
-CHUNK_LIMIT_PER_HOUR = 60
+#: The chunk endpoint's own limit, charged only for non-200s. Floods below must
+#: comfortably exceed it; honest-client tests must stay comfortably under it.
+CHUNK_FAILURE_BUDGET = 600
+
+#: A run of failures a genuinely unlucky client could hit in an hour — a flapping
+#: link corrupting chunk after chunk. It used to be the whole budget.
+BAD_NETWORK_RUN = 60
 
 
-# ── Limiter asymmetry ──────────────────────────────────────────────────────
+# ── What the failure budget charges ───────────────────────────────────────
 
-def test_a_flood_of_offset_mismatches_is_never_throttled(protocol, multi_chunk_jpeg):
-    """409 is how a resuming client finds its place; charging for it would throttle
-    resumption itself. Four times the endpoint's hourly limit, all refused the same way."""
+def test_a_flood_of_offset_mismatches_is_eventually_throttled(protocol, multi_chunk_jpeg):
+    """The cheapest sink on the endpoint, and once entirely free.
+
+    One session parked at a fixed offset answers 409 forever, and every one of those
+    requests used to cost the server a full body read with the limiter's counter still
+    reading zero. It is still not an *error* — see the resume tests below — but it is
+    no longer unmetered.
+    """
     init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
-    piece = multi_chunk_jpeg[:TEST_CHUNK_SIZE]
+    piece = multi_chunk_jpeg[:1024]
 
-    statuses = {
-        protocol.chunk(init["upload_id"], 9_999, piece).status_code
-        for _ in range(4 * CHUNK_LIMIT_PER_HOUR)
-    }
+    statuses = [protocol.chunk(init["upload_id"], 9_999, piece).status_code
+                for _ in range(CHUNK_FAILURE_BUDGET + 5)]
+
+    assert statuses[0] == 409
+    assert statuses.index(429) == CHUNK_FAILURE_BUDGET
+
+
+def test_repeated_checksum_mismatches_are_eventually_throttled(protocol, multi_chunk_jpeg):
+    """A 422 is the costliest refusal — the server read the body and hashed it before
+    finding out. Replaying a bad digest must not stay free."""
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    piece = multi_chunk_jpeg[:1024]
+
+    statuses = [protocol.chunk(init["upload_id"], 0, piece, digest="0" * 64).status_code
+                for _ in range(CHUNK_FAILURE_BUDGET + 5)]
+
+    assert statuses[0] == 422
+    assert statuses.index(429) == CHUNK_FAILURE_BUDGET
+
+
+def test_repeated_chunks_with_no_digest_are_eventually_throttled(protocol,
+                                                                 multi_chunk_jpeg):
+    """Omitting ``X-Chunk-SHA256`` was once a way to write unverified bytes; it was
+    also, because only 422s were charged, a way to replay them for free."""
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    piece = multi_chunk_jpeg[:1024]
+    url = f"{protocol.base}/chunk/{init['upload_id']}"
+
+    statuses = [protocol.client.post(url, data=piece,
+                                     content_type="application/octet-stream",
+                                     headers={"X-Upload-Offset": "0"}).status_code
+                for _ in range(CHUNK_FAILURE_BUDGET + 5)]
+
+    assert statuses[0] == 400
+    assert statuses.index(429) == CHUNK_FAILURE_BUDGET
+
+
+def test_repeated_overruns_are_eventually_throttled(protocol, multi_chunk_jpeg):
+    """413 was free too: understate ``total_size`` at init and every chunk after it is
+    a refused 8 MiB read, indefinitely."""
+    init = protocol.init("clip.jpg", 1024).get_json()
+    piece = multi_chunk_jpeg[:4096]
+
+    statuses = [protocol.chunk(init["upload_id"], 0, piece).status_code
+                for _ in range(CHUNK_FAILURE_BUDGET + 5)]
+
+    assert statuses[0] == 413
+    assert statuses.index(429) == CHUNK_FAILURE_BUDGET
+
+
+# ── What it must not charge ────────────────────────────────────────────────
+
+def test_a_full_upload_spends_nothing_at_all(protocol, multi_chunk_jpeg, album, photos):
+    """A 500 MB file is ~63 chunks and a bad hour is 600 refusals, so the two would
+    share a budget if success were charged. Walk a file in 1 KiB slices — more requests
+    than the whole failure budget, all of them 200, none of them charged."""
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    upload_id = init["upload_id"]
+
+    responses = protocol.send_chunks(upload_id, multi_chunk_jpeg, 1024,
+                                     stop=(CHUNK_FAILURE_BUDGET + 20) * 1024)
+
+    assert len(responses) > CHUNK_FAILURE_BUDGET
+    assert {r.status_code for r in responses} == {200}
+
+
+def test_a_resume_costs_a_rounding_error_of_the_budget(protocol, multi_chunk_jpeg):
+    """409 is how a resuming client and the loser of a two-tab race find their place.
+    Charging it is only defensible while the budget is sized so that no resume can
+    notice: the ones below are a hundred times what a real resume needs."""
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    upload_id = init["upload_id"]
+
+    statuses = {protocol.chunk(upload_id, 9_999, multi_chunk_jpeg[:1024]).status_code
+                for _ in range(BAD_NETWORK_RUN)}
 
     assert statuses == {409}
 
 
 def test_a_flood_of_offset_mismatches_leaves_the_upload_usable(protocol, multi_chunk_jpeg,
                                                                album, photos, stored_bytes):
-    """Not throttled *and* not poisoned: the session survives the flood intact."""
+    """Not poisoned, and not throttled out of finishing: the session survives intact."""
     init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
     upload_id = init["upload_id"]
-    for _ in range(2 * CHUNK_LIMIT_PER_HOUR):
+    for _ in range(2 * BAD_NETWORK_RUN):
         protocol.chunk(upload_id, 9_999, multi_chunk_jpeg[:TEST_CHUNK_SIZE])
 
     protocol.send_chunks(upload_id, multi_chunk_jpeg, TEST_CHUNK_SIZE)
@@ -59,62 +147,22 @@ def test_a_flood_of_offset_mismatches_leaves_the_upload_usable(protocol, multi_c
     assert stored_bytes(photos(album.id)[0].stored_filename) == multi_chunk_jpeg
 
 
-def test_a_full_upload_is_far_more_requests_than_the_chunk_limit_allows(
-        protocol, multi_chunk_jpeg, album, photos):
-    """The limit is 60/hour and a real file is more chunks than that, so an
-    uncharged success path is not a nicety — it is what makes the endpoint work."""
+def test_a_bad_network_run_of_checksum_failures_does_not_lock_the_user_out(
+        protocol, multi_chunk_jpeg):
+    """The inverse defect, and the reason the budget is 600 rather than 60.
+
+    The limiter guards the endpoint, not a status code — once the bucket is empty even
+    a well-formed chunk waits. With the budget set to a plausible run of corruption,
+    a flapping link was enough to deny that user uploads entirely for an hour.
+    """
     init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
     upload_id = init["upload_id"]
-
-    # Walk the file in 1 KiB slices: same bytes, many more requests than the limit.
-    responses = protocol.send_chunks(upload_id, multi_chunk_jpeg, 1024,
-                                     stop=(CHUNK_LIMIT_PER_HOUR + 20) * 1024)
-
-    assert len(responses) > CHUNK_LIMIT_PER_HOUR
-    assert {r.status_code for r in responses} == {200}
-
-
-def test_repeated_checksum_mismatches_are_eventually_throttled(protocol, multi_chunk_jpeg):
-    """A 422 is the one chunk failure that costs the server real work for nothing —
-    it read and hashed the body. Replaying a bad digest must not stay free."""
-    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
-    piece = multi_chunk_jpeg[:TEST_CHUNK_SIZE]
-
-    statuses = [protocol.chunk(init["upload_id"], 0, piece, digest="0" * 64).status_code
-                for _ in range(CHUNK_LIMIT_PER_HOUR + 5)]
-
-    assert statuses[0] == 422
-    assert 429 in statuses
-    assert statuses.index(429) == CHUNK_LIMIT_PER_HOUR
-    assert set(statuses[CHUNK_LIMIT_PER_HOUR:]) == {429}
-
-
-def test_throttling_earned_by_422s_also_stops_the_good_chunks(protocol, multi_chunk_jpeg):
-    """The limiter guards the endpoint, not a status code — once the bucket is empty
-    a well-formed chunk waits too. Pinned so the cost of a bad client is understood."""
-    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
-    upload_id = init["upload_id"]
-    for _ in range(CHUNK_LIMIT_PER_HOUR):
+    for _ in range(BAD_NETWORK_RUN):
         protocol.chunk(upload_id, 0, multi_chunk_jpeg[:TEST_CHUNK_SIZE], digest="0" * 64)
 
     honest = protocol.chunk(upload_id, 0, multi_chunk_jpeg[:TEST_CHUNK_SIZE])
 
-    assert honest.status_code == 429
-
-
-def test_offset_mismatches_do_not_count_towards_the_checksum_budget(protocol,
-                                                                    multi_chunk_jpeg):
-    """The two floods must not share a counter, or a resuming client would arrive at
-    the endpoint with its budget already spent."""
-    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
-    upload_id = init["upload_id"]
-    for _ in range(2 * CHUNK_LIMIT_PER_HOUR):
-        protocol.chunk(upload_id, 9_999, multi_chunk_jpeg[:TEST_CHUNK_SIZE])
-
-    after = protocol.chunk(upload_id, 0, multi_chunk_jpeg[:TEST_CHUNK_SIZE],
-                           digest="0" * 64)
-
-    assert after.status_code == 422   # still budget left; the 409s cost nothing
+    assert honest.status_code == 200
 
 
 # ── Size ceilings ──────────────────────────────────────────────────────────
@@ -135,7 +183,8 @@ def test_init_accepts_a_declared_size_exactly_at_the_ceiling(protocol, monkeypat
     conftest), so it would fire first and mask the boundary. Lifting it means
     rebinding ``check_user_quota``'s default arguments — the quota constants were
     captured there when the ``def`` executed, so the module attribute is not what
-    the function reads.
+    the function reads. That one rebinding is enough for the guarded INSERT as well:
+    it enforces the caps ``check_user_quota`` hands it rather than reading its own.
     """
     import pixelvault.uploads as uploads_module
     monkeypatch.setattr(uploads_module.check_user_quota, "__defaults__",
@@ -294,3 +343,89 @@ def test_init_refuses_a_non_positive_total_size(protocol, declared):
     response = protocol.init("empty.jpg", declared)
 
     assert response.status_code == 400
+
+
+# ── Quotas under concurrency ───────────────────────────────────────────────
+#
+# The caps are checked and then acted on, and for a long time those were two
+# statements with nothing holding a lock between them — pysqlite runs a bare SELECT
+# in autocommit, so a burst of inits all read the same "still room" and all inserted.
+# Measured at ~1.6x over both caps, and every session admitted over the line then sat
+# there for the full 24 h TTL. The insert now carries the caps in its own WHERE.
+
+def _init_concurrently(app, user_ref, token, requests, workers=12):
+    """Fire ``requests`` inits at once, each from its own client, returning the statuses.
+
+    A client per thread rather than one shared: the test client keeps a cookie jar and
+    a request context, and sharing those would be testing the harness, not the server.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tests.conftest import login
+    from tests.protocol import ProtocolClient
+
+    workers = min(workers, len(requests))
+    # Everything expensive — building the client, planting the session cookie — happens
+    # before the barrier, so what actually overlaps is the request itself. Without it
+    # the pool's own warm-up staggers the threads enough to hide the race.
+    at_the_line = threading.Barrier(workers)
+
+    def _one(index):
+        test_client = app.test_client()
+        login(test_client, user_ref)
+        filename, size = requests[index]
+        protocol = ProtocolClient(test_client, token)
+        at_the_line.wait()
+        return protocol.init(filename, size).status_code
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(_one, range(len(requests))))
+
+
+def _live_sessions(app):
+    from pixelvault.extensions import db
+    from pixelvault.models import UploadSession
+    with app.app_context():
+        return db.session.query(UploadSession).all()
+
+
+def test_concurrent_inits_cannot_overshoot_the_session_quota(app, user, album):
+    """Distinct client keys, so nothing is deduplicated by the unique constraint — the
+    only thing standing between 24 simultaneous inits and 24 sessions is the cap."""
+    requests = [(f"file{i}.jpg", 4096) for i in range(12)]
+
+    statuses = _init_concurrently(app, user, album.token, requests)
+
+    assert len(_live_sessions(app)) <= TEST_MAX_SESSIONS
+    assert statuses.count(201) == len(_live_sessions(app))
+    assert set(statuses) <= {201, 429}
+
+
+def test_concurrent_inits_cannot_overshoot_the_in_flight_byte_quota(app, user, album):
+    """Same race, counted in bytes: one 3 MB session fits under a 4 MB cap and two
+    do not, however close together they arrive."""
+    three_mb = 3 * MB
+    requests = [(f"big{i}.jpg", three_mb) for i in range(12)]
+
+    _init_concurrently(app, user, album.token, requests)
+
+    sessions = _live_sessions(app)
+    assert sum(row.total_size for row in sessions) <= TEST_MAX_INFLIGHT_MB * MB
+    assert len(sessions) == 1
+
+
+def test_a_refused_concurrent_init_still_explains_itself(app, user, album):
+    """The guard lives in the INSERT, which cannot say which cap it tripped; the
+    message has to come from re-reading the table afterwards."""
+    requests = [(f"file{i}.jpg", 4096) for i in range(12)]
+
+    _init_concurrently(app, user, album.token, requests)
+    from tests.protocol import ProtocolClient
+    from tests.conftest import login
+    test_client = app.test_client()
+    login(test_client, user)
+    refused = ProtocolClient(test_client, album.token).init("one-more.jpg", 4096)
+
+    assert refused.status_code == 429
+    assert "error" in refused.get_json()

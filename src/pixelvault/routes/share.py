@@ -7,15 +7,29 @@ from ..extensions import db, limiter
 from ..models import Album, Photo, AlbumAccess
 from ..config import UPLOAD_CHUNK_SIZE, UPLOAD_SESSION_TTL_HOURS
 from ..uploads import (UploadError, OffsetMismatch, SessionUnusable, append_chunk,
-                       discard_session, get_session, is_valid_client_key,
-                       maybe_sweep_expired_sessions, open_or_recover_session)
-from ..utils import (validate_file, validate_file_header, validate_stored_file,
+                       discard_session, ensure_offset_matches, get_session,
+                       is_valid_client_key, maybe_sweep_expired_sessions,
+                       open_or_recover_session)
+from ..utils import (ImageTooLargeError, validate_file, validate_file_header, validate_stored_file,
                      save_file, store_upload, build_album_zip)
 
 # Headroom over one chunk for the per-route body cap. A chunk is exactly
 # UPLOAD_CHUNK_SIZE, but a client is entitled to send a short final one and the
 # slack absorbs any framing a proxy adds without admitting a second chunk's worth.
 _CHUNK_BODY_SLACK = 64 * 1024
+
+
+def _store_failure_message(exc):
+    """Return the per-file message for a store that raised.
+
+    An image refused for its dimensions is a decision the user can act on — shrink it,
+    or accept that the album will not take it — so it says so. Everything else stays
+    deliberately vague: the exception text can name paths and library internals, and
+    this string is handed straight to the uploader.
+    """
+    if isinstance(exc, ImageTooLargeError):
+        return str(exc)
+    return 'Upload failed.'
 
 
 def _upload_error(err):
@@ -137,8 +151,8 @@ def register(app):
 
             try:
                 stored_name, file_size, has_thumbnail, taken_at = save_file(file, mime_type)
-            except Exception:
-                results.append({'filename': file.filename, 'error': 'Upload failed.'})
+            except Exception as exc:
+                results.append({'filename': file.filename, 'error': _store_failure_message(exc)})
                 continue
 
             photo = Photo(
@@ -247,16 +261,30 @@ def register(app):
                                         .strftime('%Y-%m-%dT%H:%M:%SZ'),
         })
 
-    # Charge the limiter only for 422s. A 422 means the bytes did not match their
-    # declared digest — corrupt or forged — and replaying a bad digest is otherwise a
-    # free way to make the server read and hash 8 MiB forever. A 409 is the opposite:
-    # normal control flow, how a resuming client and the loser of a two-tab race learn
-    # where to seek. Charging it would throttle the very feature this endpoint exists
-    # for. A plain count limit cannot work either — one 500 MB file is ~60 requests, so
-    # request count stopped correlating with cost. See docs/upload_protocol.md §8.
+    # Charge the limiter for every chunk request that is not a 200, and for nothing
+    # else. Two defects sat in the previous '422 only' rule, in opposite directions.
+    #
+    # Too little: every other status was free, so any refusal was an unmetered sink.
+    # The cheapest was a session parked at a fixed offset — 8 MiB of body per request,
+    # 409 each time, forever, with the counter still reading zero. 413 (understated
+    # ``total_size``) and 400 (a first slice libmagic rejects) were the same trick with
+    # a different status.
+    #
+    # Too much: the limit was still *checked* on every request even though it was only
+    # deducted on 422s, so a user whose link corrupted 60 chunks — a bad-network day,
+    # not an attack — was then 429'd on every chunk they sent for the rest of the hour.
+    # Sixty checksum failures could deny that user the feature entirely.
+    #
+    # The budget is therefore sized for failures, not for traffic. A 500 MB file is ~63
+    # chunks and spends nothing; a resume costs one 409; a flaky link costs a handful of
+    # 422s. 600 is roughly an order of magnitude above the worst honest hour we can
+    # construct, and an order of magnitude below what makes the endpoint worth abusing:
+    # it caps a hostile client at 600 refusals an hour, and — since a 409 is now
+    # answered before the body is read at all — the ones that cost a body read are only
+    # those where the client really did send bytes. See docs/upload_protocol.md §8.
     @app.route('/share/<token>/upload/chunk/<upload_id>', methods=['POST'])
     @login_required
-    @limiter.limit("60 per hour", deduct_when=lambda r: r.status_code == 422)
+    @limiter.limit("600 per hour", deduct_when=lambda r: r.status_code != 200)
     def upload_chunk(token, upload_id):
         """
         Append one slice of a chunked upload at the offset the client declares.
@@ -279,21 +307,26 @@ def register(app):
         except (KeyError, ValueError):
             return jsonify({'error': 'X-Upload-Offset must be an integer byte offset.'}), 400
 
-        data = request.get_data()
-        if not data:
-            return jsonify({'error': 'Chunk body is empty.'}), 400
-
-        if offset == 0:
-            # Cheap early rejection: sniffing the first slice fails a disallowed type
-            # after 8 MiB instead of after 470 MB. Advisory only — the authoritative
-            # check runs on the assembled file at complete, and a client controlling
-            # its first slice can pass here and still be refused there, which is
-            # exactly what should happen.
-            _, err = validate_file_header(upload_session.original_filename, data[:2048])
-            if err:
-                return jsonify({'error': err}), 400
-
         try:
+            # Before ``request.get_data()``, deliberately. A chunk aimed at the wrong
+            # offset is refused on two header values and the row already in hand, so
+            # the commonest refusal on this endpoint never buffers a body or sniffs it.
+            ensure_offset_matches(upload_session, offset)
+
+            data = request.get_data()
+            if not data:
+                return jsonify({'error': 'Chunk body is empty.'}), 400
+
+            if offset == 0:
+                # Cheap early rejection: sniffing the first slice fails a disallowed
+                # type after 8 MiB instead of after 470 MB. Advisory only — the
+                # authoritative check runs on the assembled file at complete, and a
+                # client controlling its first slice can pass here and still be refused
+                # there, which is exactly what should happen.
+                _, err = validate_file_header(upload_session.original_filename, data[:2048])
+                if err:
+                    return jsonify({'error': err}), 400
+
             received_bytes = append_chunk(
                 db.session, upload_session, current_app.config['UPLOAD_FOLDER'],
                 data, offset, request.headers.get('X-Chunk-SHA256'),
@@ -340,8 +373,18 @@ def register(app):
         try:
             stored_name, file_size, has_thumbnail, taken_at = store_upload(
                 partial, filename, mime_type)
-        except Exception:
-            return jsonify({'results': [{'filename': filename, 'error': 'Upload failed.'}]})
+        except Exception as exc:
+            # Discard on the way out, exactly as the validation branch above does.
+            # Keeping the session would cost the user twice over: the row holds a
+            # concurrency slot and its full declared size against the byte quota for
+            # the rest of the TTL, and the partial holds the disk. It would buy nothing
+            # in return — every retry replays the same conversion over the same bytes
+            # and fails the same way, at 600 attempts an hour. A transient failure does
+            # mean the user has to re-send the file; that is the deliberate trade, and
+            # it is the same one a failed validation already makes.
+            discard_session(db.session, upload_session, upload_dir)
+            return jsonify({'results': [{'filename': filename,
+                                        'error': _store_failure_message(exc)}]})
 
         photo = Photo(
             album_id=album.id,

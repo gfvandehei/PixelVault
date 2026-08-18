@@ -326,18 +326,11 @@ def test_expiry_reclaims_a_session_at_any_point_in_its_life(
 
 # ── Sessions orphaned by an album that goes away ───────────────────────────
 
-@pytest.mark.xfail(
-    reason="BUG: /album/<token>/delete (routes/albums.py:246) issues "
-           "db.session.delete(album) with no cascade to upload_session and no "
-           "PRAGMA foreign_keys, so an in-flight session survives the album it "
-           "points at. The row is dead — every chunk now 404s because "
-           "_album_for_upload cannot resolve the token — but check_user_quota "
-           "joins nothing, so it keeps charging the uploader a concurrency slot and "
-           "its full declared total_size until the TTL expires a day later.",
-    strict=True,
-)
 def test_deleting_an_album_does_not_strand_the_uploaders_quota(
         app, client, protocol, album, multi_chunk_jpeg):
+    """A session outliving its album is dead but not free: every chunk 404s because
+    the share token no longer resolves, while the row goes on charging a concurrency
+    slot and its whole declared size against the byte quota for the rest of the TTL."""
     from pixelvault.extensions import db
     from pixelvault.models import UploadSession
 
@@ -349,16 +342,81 @@ def test_deleting_an_album_does_not_strand_the_uploaders_quota(
         assert db.session.query(UploadSession).count() == 0
 
 
-def test_a_session_orphaned_by_a_deleted_album_is_reclaimed_by_the_sweep(
-        app, client, protocol, album, multi_chunk_jpeg, session_row, partials_dir,
-        age_session):
-    """The backstop for the defect above: nothing else collects these, but the TTL
-    sweep does — which is why its orphan branch exists at all."""
-    upload_id, _ = _started(protocol, multi_chunk_jpeg)
+def test_deleting_an_album_takes_the_partial_files_with_it(
+        app, client, protocol, album, multi_chunk_jpeg, partials_dir):
+    """The row and its bytes go together, or the disk leaks for a day either way."""
+    _started(protocol, multi_chunk_jpeg)
+    assert list(partials_dir.glob("*.part")) != []
+
     client.post(f"/album/{album.token}/delete")
+
+    assert list(partials_dir.glob("*.part")) == []
+
+
+def test_a_session_orphaned_by_a_deleted_album_is_still_reclaimed_by_the_sweep(
+        app, protocol, album, multi_chunk_jpeg, session_row, partials_dir,
+        age_session):
+    """The backstop. The delete route now cascades, but it is two steps — rows, then
+    files — and a crash between them, or any album removed by a route that does not
+    know about uploads, still strands a session. The album row is dropped directly
+    here to reproduce exactly that state; the TTL sweep is what collects it, which is
+    why its orphan branch exists at all."""
+    from pixelvault.extensions import db
+    from pixelvault.models import Album
+
+    upload_id, _ = _started(protocol, multi_chunk_jpeg)
+    with app.app_context():
+        db.session.delete(db.session.query(Album).filter_by(id=album.id).one())
+        db.session.commit()
     age_session(upload_id)
 
     _sweep(app)
 
     assert session_row(upload_id) is None
     assert list(partials_dir.glob("*.part")) == []
+
+
+# ── Sessions left behind by a failed commit ────────────────────────────────
+
+def test_a_complete_that_blows_up_in_storage_does_not_strand_the_session(
+        app, protocol, multi_chunk_jpeg, session_row, partials_dir, monkeypatch):
+    """``complete`` used to return the error and keep everything.
+
+    The session then held a concurrency slot and its full declared size against the
+    byte quota until the TTL, the ``.part`` held the disk, and the whole conversion
+    was replayable at the complete endpoint's own limit. The validation branch beside
+    it already discarded; this is the same answer for the same reason.
+    """
+    import pixelvault.routes.share as share_module
+
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    upload_id = init["upload_id"]
+    protocol.send_chunks(upload_id, multi_chunk_jpeg, TEST_CHUNK_SIZE)
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("thumbnailer fell over")
+    monkeypatch.setattr(share_module, "store_upload", _explode)
+
+    response = protocol.complete(upload_id)
+
+    assert response.status_code == 200
+    assert "error" in response.get_json()["results"][0]
+    assert session_row(upload_id) is None
+    assert list(partials_dir.glob("*.part")) == []
+
+
+def test_the_slot_a_failed_complete_held_is_given_back(
+        app, protocol, multi_chunk_jpeg, monkeypatch):
+    """The point of discarding: the user can start something else afterwards."""
+    import pixelvault.routes.share as share_module
+
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    protocol.send_chunks(init["upload_id"], multi_chunk_jpeg, TEST_CHUNK_SIZE)
+    for i in range(TEST_MAX_SESSIONS - 1):
+        protocol.init(f"filler{i}.jpg", 4096)
+
+    monkeypatch.setattr(share_module, "store_upload",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    protocol.complete(init["upload_id"])
+
+    assert protocol.init("next.jpg", 4096).status_code == 201

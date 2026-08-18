@@ -55,6 +55,33 @@ def test_a_chunk_ahead_of_the_cursor_is_409_rather_than_leaving_a_hole(
     assert response.get_json()["received_bytes"] == cursor
 
 
+def test_a_mis_aimed_chunk_is_refused_before_its_body_is_read(protocol, multi_chunk_jpeg):
+    """A body far over the per-chunk ceiling still answers 409, not 413.
+
+    Which is the observable proof of the ordering: the offset is checked against two
+    headers and a row already in hand, before ``request.get_data()`` buffers anything.
+    A 409 is the one refusal a well-behaved client produces in bulk, and it used to
+    cost a full chunk read every time.
+    """
+    upload_id, cursor = _started(protocol, multi_chunk_jpeg)
+
+    response = protocol.chunk(upload_id, 9_999, multi_chunk_jpeg)
+
+    assert response.status_code == 409
+    assert response.get_json()["received_bytes"] == cursor
+
+
+def test_a_mis_aimed_first_chunk_is_not_sniffed(protocol, multi_chunk_jpeg, not_an_image):
+    """The libmagic sniff on ``offset == 0`` used to run before the offset check, so a
+    chunk aimed at an advanced session paid for a sniff and then 409'd anyway."""
+    upload_id, cursor = _started(protocol, multi_chunk_jpeg)
+
+    response = protocol.chunk(upload_id, 0, not_an_image)
+
+    assert response.status_code == 409          # not 400: the sniff never ran
+    assert response.get_json()["received_bytes"] == cursor
+
+
 def test_a_replayed_chunk_does_not_double_append(protocol, multi_chunk_jpeg,
                                                  session_row, partials_dir):
     """The retry a flaky network produces must be a no-op, not an insertion."""
@@ -155,17 +182,15 @@ def test_an_uppercase_digest_is_accepted(protocol, multi_chunk_jpeg):
     assert response.status_code == 200
 
 
-@pytest.mark.xfail(
-    reason="BUG: uploads.append_chunk skips verification entirely when "
-           "X-Chunk-SHA256 is absent (`if chunk_sha256 is not None`), so a client "
-           "that simply omits the header writes unverified bytes AND dodges the "
-           "422 rate-limit charge. §6.3 lists the header as part of every chunk "
-           "request and §9's flowchart puts the digest check on the only path to "
-           "the append.",
-    strict=True,
-)
 def test_a_chunk_with_no_digest_header_is_refused(protocol, multi_chunk_jpeg,
                                                   session_row):
+    """The digest is mandatory: absent is not "unverified", it is refused.
+
+    Skipping the check when the header was missing made omitting it strictly better
+    than sending a wrong one — unverified bytes landed mid-file with a 200, and the
+    rate-limit charge a bad digest earns was dodged along with it. 400 rather than
+    422: an absent header will still be absent on a retry.
+    """
     upload_id, cursor = _started(protocol, multi_chunk_jpeg)
     piece = multi_chunk_jpeg[cursor:cursor + TEST_CHUNK_SIZE]
 
@@ -300,3 +325,75 @@ def test_completing_with_the_partial_missing_is_a_404(protocol, small_jpeg, part
     response = protocol.complete(init["upload_id"])
 
     assert response.status_code == 404
+
+
+# ── Concurrent appends to one session ──────────────────────────────────────
+
+def _chunk_concurrently(app, user_ref, token, upload_id, payloads):
+    """POST every payload at offset 0 at the same instant, returning the responses.
+
+    A client per thread, and a barrier so what overlaps is the request and not the
+    thread pool warming up. This is the shape of a two-tab race, or of a client that
+    retried a chunk whose first attempt had not actually died.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tests.conftest import login
+    from tests.protocol import ProtocolClient
+
+    at_the_line = threading.Barrier(len(payloads))
+
+    def _one(payload):
+        test_client = app.test_client()
+        login(test_client, user_ref)
+        protocol = ProtocolClient(test_client, token)
+        at_the_line.wait()
+        return protocol.chunk(upload_id, 0, payload)
+
+    with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+        return list(pool.map(_one, payloads))
+
+
+def test_concurrent_duplicate_chunks_produce_exactly_one_success(
+        app, user, album, protocol, multi_chunk_jpeg, session_row, partials_dir):
+    """Six clients, same offset, six different payloads — one receipt, not six.
+
+    The append used to be check-then-write with nothing serialising it: all six passed
+    their checks against the same stale in-memory row, all six wrote, and all six
+    committed ``received_bytes = 0 + len``. The counter agreed with itself only because
+    every racer had started from the same stale base, so five clients walked away
+    holding a 200 for bytes that were no longer on disk — and the one payload that
+    survived was not necessarily the one the winner had acknowledged.
+    """
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    upload_id = init["upload_id"]
+    piece = multi_chunk_jpeg[:TEST_CHUNK_SIZE]
+    # Same length and the same (sniffable) JPEG header, distinguishable by the last
+    # byte, so the file on disk names its own author.
+    payloads = [piece[:-1] + bytes([i]) for i in range(6)]
+
+    responses = _chunk_concurrently(app, user, album.token, upload_id, payloads)
+
+    statuses = [r.status_code for r in responses]
+    assert statuses.count(200) == 1
+    assert set(statuses) == {200, 409}
+    assert session_row(upload_id).received_bytes == len(piece)
+
+    winner = payloads[statuses.index(200)]
+    assert _partial(partials_dir, upload_id).read_bytes() == winner
+
+
+def test_a_loser_of_a_concurrent_append_is_told_the_true_cursor(
+        app, user, album, protocol, multi_chunk_jpeg):
+    """409 carries the offset to re-seek to, which is the whole reason it is a 409 and
+    not a 500: the losing clients resume rather than restarting."""
+    init = protocol.init_for("clip.jpg", multi_chunk_jpeg).get_json()
+    piece = multi_chunk_jpeg[:TEST_CHUNK_SIZE]
+    payloads = [piece[:-1] + bytes([i]) for i in range(4)]
+
+    responses = _chunk_concurrently(app, user, album.token, init["upload_id"], payloads)
+
+    losers = [r for r in responses if r.status_code == 409]
+    assert losers, "expected the race to have losers"
+    assert {r.get_json()["received_bytes"] for r in losers} == {len(piece)}

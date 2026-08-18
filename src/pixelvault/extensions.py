@@ -1,11 +1,14 @@
 import sqlite3
 
+from flask import flash, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, current_user
+from flask_login.utils import login_url
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
+from werkzeug.utils import redirect
 from pixelvault.models import Base, User
 
 
@@ -51,6 +54,55 @@ login_manager.login_message = 'Please log in to access this page.'
 @login_manager.user_loader
 def load_user(user_id):
     return db.session.get(User, int(user_id))
+
+
+def _wants_json():
+    """Return True if this request is a program's, not a browser page load's.
+
+    Four signals, any one of which is decisive:
+
+    * ``X-Requested-With: XMLHttpRequest`` — set on every request uploader.js makes;
+    * a JSON request body, which no navigation has;
+    * an ``Accept`` that prefers JSON over HTML;
+    * an endpoint that only ever speaks JSON.
+
+    The endpoint check is not redundant. A chunk body is ``application/octet-stream``
+    and carries no ``Accept``, so on a non-XHR client — curl, a retry from a service
+    worker — the first three all miss, and answering that with a login page would be
+    the same bug in a different disguise.
+    """
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return True
+    if request.is_json:
+        return True
+    if request.accept_mimetypes.best_match(('text/html', 'application/json'),
+                                           default=None) == 'application/json':
+        return True
+    endpoint = request.endpoint or ''
+    return endpoint.startswith(('upload_', 'api_', 'do_upload')) or request.path.startswith('/api/')
+
+
+@login_manager.unauthorized_handler
+def handle_unauthorized():
+    """Answer an unauthenticated request in the dialect it asked in.
+
+    Flask-Login's default is a 302 to ``login_view``, which is right for a browser
+    following a link and wrong for everything else: XHR follows a redirect
+    transparently, so an upload whose session expired mid-transfer saw HTTP 200 with an
+    HTML login page in the body, found no ``results`` key in it, and reported the
+    generic "Upload failed". The 401 branch uploader.js already has — "Session expired
+    — reload the page", the one instruction that actually resolves it — was unreachable.
+
+    The HTML path below reproduces the default exactly, flash message and ``next``
+    parameter included, so ordinary logged-out browsing is unchanged. It has to be
+    reproduced rather than delegated to: ``login_manager.unauthorized()`` dispatches
+    back into this handler.
+    """
+    if _wants_json():
+        return jsonify({'error': 'Session expired — reload the page.'}), 401
+    if login_manager.login_message:
+        flash(login_manager.login_message, login_manager.login_message_category)
+    return redirect(login_url(login_manager.login_view, request.url))
 
 
 def rate_limit_key():

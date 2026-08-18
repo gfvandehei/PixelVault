@@ -1,6 +1,7 @@
 import io
 import os
 import uuid
+import warnings
 import zipfile
 from datetime import datetime
 from functools import wraps
@@ -19,6 +20,80 @@ except ImportError:
     pass  # HEIC support unavailable if pillow-heif not installed
 
 from .config import ALLOWED_PHOTO_TYPES, ALLOWED_MIME_TYPES, ALLOWED_EXTENSIONS
+
+
+# The decompression-bomb ceiling, in pixels.
+#
+# Pillow ships a 89,478,485 px limit, but between that and *twice* it Pillow only
+# emits a DecompressionBombWarning and decodes the image anyway. A 173 KB PNG
+# declaring 20000x8900 (178 Mpx) sits deliberately inside that window and costs
+# ~1 GB of RSS to decode; with the 2 workers x 4 threads Gunicorn runs in
+# production, eight of them at once are enough to get the container OOM-killed.
+#
+# 50 Mpx is chosen because it clears every camera a photo album realistically
+# sees at full resolution — 48 MP iPhone (8064x6048), 50 MP Sony A1,
+# 45 MP Canon R5, 61 MP A7R V downsampled — while capping a single decode at
+# roughly 150 MB of RGB pixel data, so even the full 8-way fan-out cannot be
+# driven much past 1 GB.
+MAX_IMAGE_PIXELS = 50_000_000
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
+# Closes the warn-and-decode window: past the ceiling Pillow now raises instead of
+# printing a warning and allocating the raster regardless. Belt and braces only —
+# the explicit `_guard_image_dimensions` check below does not depend on the warnings
+# filter, which any caller (pytest included) is free to reset.
+warnings.filterwarnings('error', category=Image.DecompressionBombWarning)
+
+
+class ImageTooLargeError(ValueError):
+    """Raised when an image's declared dimensions exceed :data:`MAX_IMAGE_PIXELS`.
+
+    A ``ValueError``, not an ``abort``: the upload routes turn a failed store into a
+    per-file entry in the ``results`` envelope, so a bomb is reported like any other
+    rejected file rather than as a 500.
+    """
+
+
+def _guard_image_dimensions(source):
+    """Reject an image whose pixel count exceeds the ceiling, before anything decodes it.
+
+    ``Image.open`` parses the header without allocating the raster, so the cost of
+    this check is bounded by the file's metadata no matter how large the image claims
+    to be. That ordering is the whole point: a dimension check performed after
+    ``convert``, ``exif_transpose`` or ``thumbnail`` has already paid the gigabyte.
+
+    Note this cannot be left to the thumbnail branch's ``except Exception: pass``
+    below — that swallow would turn a rejected bomb into a silently committed file
+    with no thumbnail, which is the opposite of what should happen.
+    """
+    from_stream = _is_file_storage(source)
+    try:
+        opened = Image.open(source.stream if from_stream else str(source))
+        try:
+            width, height = opened.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ImageTooLargeError(
+                    f"Image is too large to process: {width}x{height} is "
+                    f"{width * height:,} pixels, and the limit is {MAX_IMAGE_PIXELS:,}."
+                )
+        finally:
+            # Close only what we opened by path. Pillow closes whatever file object it
+            # holds, so closing a stream-backed image would shut the FileStorage's own
+            # stream and leave the caller with nothing left to save.
+            if not from_stream:
+                opened.close()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        # Pillow's own ceiling fires first for anything past twice the limit, before we
+        # ever see .size. Re-raise as our type, with our wording: Pillow's mentions its
+        # own doubled threshold and calls the file a "DOS attack", neither of which
+        # helps someone who simply photographed a very large panorama.
+        raise ImageTooLargeError(
+            f"Image is too large to process: the limit is {MAX_IMAGE_PIXELS:,} pixels."
+        ) from exc
+    finally:
+        if from_stream:
+            # The caller still has to read these bytes; put the cursor back.
+            source.stream.seek(0)
 
 
 def admin_required(f):
@@ -150,10 +225,19 @@ def store_upload(source, original_filename, mime_type):
     Returns ``(stored_name, file_size, has_thumbnail, taken_at)``.
     """
     ext = Path(original_filename).suffix.lower()
-    is_heic = ext in ('.heic', '.heif') or mime_type in ('image/heic', 'image/heif')
+    # Decided by the DETECTED mime type alone. Trusting the extension here let a
+    # client choose its own code path: naming a 178 Mpx PNG ".heic" routed it through
+    # the re-encode branch below and then the thumbnail branch, doubling the cost of a
+    # decompression bomb. The extension is the attacker's to pick; the sniffed type is not.
+    is_heic = mime_type in ('image/heic', 'image/heif')
 
     if is_heic:
         ext = '.jpg'
+
+    # Before any decode, and before the bytes are placed: a rejected image must leave
+    # nothing behind in the media root.
+    if mime_type in ALLOWED_PHOTO_TYPES:
+        _guard_image_dimensions(source)
 
     stored_name = f"{uuid.uuid4()}{ext}"
     upload_dir = Path(current_app.config['UPLOAD_FOLDER'])
