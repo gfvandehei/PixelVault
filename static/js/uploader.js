@@ -1,13 +1,34 @@
 /*
  * Shared file uploader with per-file progress.
  *
- * Uploads one file per request through a small concurrency pool so each file
- * gets its own byte-level progress stream (XMLHttpRequest.upload.onprogress —
- * fetch() exposes no such events, which is why this is not written with fetch).
+ * Two transports live behind one interface:
+ *
+ *   - Small files (<= CHUNK_THRESHOLD) take the legacy path: one multipart
+ *     POST to `url`, byte progress straight off XMLHttpRequest.upload. This
+ *     path is untouched and is still the only path when crypto.subtle is
+ *     unavailable.
+ *   - Large files are sliced into CHUNK_SIZE pieces and pushed through the
+ *     chunked protocol in docs/upload_protocol.md — init, N x chunk,
+ *     complete. Cloudflare's free plan drops any request body over 100 MB at
+ *     the edge, so a 470 MB video never reached the origin at all; slicing it
+ *     keeps every request comfortably small, and makes the transfer resumable
+ *     as a side effect.
+ *
+ * XHR rather than fetch throughout: fetch() exposes no upload progress events,
+ * and progress is the entire point of this file.
  *
  * Per-file lifecycle: pending -> uploading -> processing -> done | error.
  * The 'processing' phase matters: the server converts HEIC and builds
- * thumbnails after the last byte lands, so 100% sent is not 100% complete.
+ * thumbnails after the last byte lands, so 100% sent is not 100% complete. On
+ * the chunked path 'processing' begins when `complete` is issued rather than
+ * when the last chunk's bytes land — the bytes are merely on disk at that
+ * point, and all the slow work happens inside that final request.
+ *
+ * Resumability: `client_key -> upload_id` is cached in localStorage, keyed by
+ * album token. Re-picking a file that has a live session probes the server and
+ * restarts from its authoritative offset. Browsers cannot re-open a File across
+ * a reload, so the user must re-select the file; only the transfer resumes.
+ * localStorage being absent or full degrades to non-resumable, never to broken.
  *
  * A watchdog covers the two ways an upload can look alive while being dead:
  * a connection that hangs mid-transfer (XHR fires no event for this, so idle
@@ -24,11 +45,22 @@
   var RATE_WINDOW_MS = 3000;    // rolling window for the transfer-rate estimate
   var RATE_MIN_ELAPSED_MS = 500;// don't show a rate before this much has elapsed
   var RATE_MIN_BYTES = 1048576; // ...or for files smaller than this (1 MB)
-  var MAX_AUTO_RETRIES = 1;     // automatic retries on network failure
+  var MAX_AUTO_RETRIES = 1;     // automatic retries on network failure (per chunk)
   var WATCHDOG_MS = 1000;       // how often in-flight items are re-checked
   var STALL_WARN_MS = 20000;    // no bytes moved this long -> warn, offer retry
   var STALL_FAIL_MS = 90000;    // ...still nothing -> abort so the row is retryable
   var PROCESS_WARN_MS = 60000;  // server-side processing running unusually long
+
+  /* Chunked path. CHUNK_SIZE mirrors UPLOAD_CHUNK_SIZE in the protocol doc,
+     but the server's `init` response is authoritative and overrides it. */
+  var CHUNK_SIZE = 8388608;         // 8 MiB
+  var CHUNK_THRESHOLD = 8388608;    // at or under this, use the legacy path
+  var RETRY_DELAY_MS = 800;         // same backoff the legacy path uses
+  var RATE_LIMIT_DELAY_MS = 5000;   // 429 deserves a longer pause than a blip
+  var MAX_OFFSET_RESYNCS = 5;       // consecutive 409s before calling it a livelock
+  var MAX_SESSION_RESTARTS = 1;     // 404 -> re-init from zero, at most this often
+  var RESUME_TTL_MS = 86400000;     // 24h, mirroring UPLOAD_SESSION_TTL_HOURS
+  var RESUME_KEY_PREFIX = 'pv.upload.resume.';
 
   function humanSize(bytes) {
     var units = ['B', 'KB', 'MB', 'GB'];
@@ -73,8 +105,189 @@
     return node;
   }
 
+  // ── Crypto helpers ────────────────────────────────────────────────────────
+  //
+  // crypto.subtle only exists in a secure context. Production is HTTPS and
+  // http://localhost also qualifies, but a plain-HTTP deployment would find it
+  // missing — so every caller here treats absence as "no chunking available"
+  // rather than as an exception.
+
+  function subtleCrypto() {
+    try {
+      return (global.crypto && global.crypto.subtle) || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function toHex(buffer) {
+    var view = new Uint8Array(buffer);
+    var out = '';
+    for (var i = 0; i < view.length; i++) {
+      out += (view[i] < 16 ? '0' : '') + view[i].toString(16);
+    }
+    return out;
+  }
+
+  /* TextEncoder ships alongside crypto.subtle everywhere it matters, but the
+     escape/encodeURIComponent trick is a two-line UTF-8 encoder and filenames
+     are routinely non-ASCII — not worth the risk of a wrong digest. */
+  function utf8Bytes(str) {
+    if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(str);
+    var binary = unescape(encodeURIComponent(str));
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i) & 0xff;
+    return bytes;
+  }
+
+  /* Resolves to lowercase hex, or to null when digesting is impossible.
+     Never rejects: callers treat a null digest as a capability gap. */
+  function sha256Hex(data) {
+    var subtle = subtleCrypto();
+    if (!subtle) return Promise.resolve(null);
+    var bytes = typeof data === 'string' ? utf8Bytes(data) : data;
+    try {
+      return Promise.resolve(subtle.digest('SHA-256', bytes)).then(toHex, function () {
+        return null;
+      });
+    } catch (e) {
+      return Promise.resolve(null);
+    }
+  }
+
+  /* §7 of the protocol: sha256_hex(name \0 size \0 lastModified). The server
+     never recomputes this — it is validated as 64 hex chars and used purely as
+     an idempotency key — so the two sides cannot drift over hashing details.
+     Including size and mtime means an edited file yields a different key and
+     starts a new session instead of resuming into a mismatched prefix. */
+  function fingerprintSource(file) {
+    var mtime = file.lastModified;
+    if (mtime == null) {
+      mtime = file.lastModifiedDate ? file.lastModifiedDate.getTime() : 0;
+    }
+    return file.name + '\0' + file.size + '\0' + mtime;
+  }
+
+  /* Blob.arrayBuffer() would be one line but is missing from Safari < 14 and
+     every pre-Chromium Edge; FileReader is universally available. The buffer is
+     needed in memory anyway to compute the chunk digest, so reading it costs
+     nothing extra over sending the Blob directly. */
+  function readSlice(file, start, end) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(reader.error || new Error('read failed')); };
+      reader.readAsArrayBuffer(file.slice(start, end));
+    });
+  }
+
+  // ── Resume store ──────────────────────────────────────────────────────────
+  //
+  // client_key -> { id: upload_id, at: timestamp }, one localStorage entry per
+  // album so two albums holding the same file never hand each other a session
+  // id the server will reject as not-theirs.
+
+  function ResumeStore(namespace) {
+    this.key = RESUME_KEY_PREFIX + namespace;
+    this.enabled = false;
+    try {
+      /* Private browsing and some embedded webviews throw on the *first*
+         access, not on construction, so probe with a real round trip. */
+      var probe = this.key + '.probe';
+      global.localStorage.setItem(probe, '1');
+      global.localStorage.removeItem(probe);
+      this.enabled = true;
+    } catch (e) {
+      this.enabled = false;
+    }
+    this.prune();
+  }
+
+  ResumeStore.prototype._read = function () {
+    if (!this.enabled) return {};
+    try {
+      return JSON.parse(global.localStorage.getItem(this.key)) || {};
+    } catch (e) {
+      return {};
+    }
+  };
+
+  ResumeStore.prototype._write = function (map) {
+    if (!this.enabled) return;
+    try {
+      global.localStorage.setItem(this.key, JSON.stringify(map));
+    } catch (e) {
+      /* Quota exhausted. Our own entries are tiny, so the pressure is almost
+         certainly someone else's — drop ours entirely and stop trying. Losing
+         resumability is a far better outcome than breaking the upload. */
+      try { global.localStorage.removeItem(this.key); } catch (e2) { /* ignore */ }
+      this.enabled = false;
+    }
+  };
+
+  /* Entries outlive their server sessions if the user never returns, so expire
+     them on the same TTL the server uses rather than growing without bound. */
+  ResumeStore.prototype.prune = function () {
+    if (!this.enabled) return;
+    var map = this._read();
+    var cutoff = Date.now() - RESUME_TTL_MS;
+    var changed = false;
+    Object.keys(map).forEach(function (k) {
+      var entry = map[k];
+      if (!entry || !entry.id || !(entry.at > cutoff)) {
+        delete map[k];
+        changed = true;
+      }
+    });
+    if (changed) this._write(map);
+  };
+
+  ResumeStore.prototype.get = function (clientKey) {
+    if (!clientKey) return null;
+    var entry = this._read()[clientKey];
+    return entry && entry.id ? entry.id : null;
+  };
+
+  ResumeStore.prototype.set = function (clientKey, uploadId) {
+    if (!clientKey || !uploadId || !this.enabled) return;
+    var map = this._read();
+    map[clientKey] = { id: uploadId, at: Date.now() };
+    this._write(map);
+  };
+
+  ResumeStore.prototype.evict = function (clientKey) {
+    if (!clientKey || !this.enabled) return;
+    var map = this._read();
+    if (!(clientKey in map)) return;
+    delete map[clientKey];
+    this._write(map);
+  };
+
+  /* The templates hand us only the legacy upload URL, and the chunked routes
+     hang off it: /share/<token>/upload/{init,status,chunk,complete}. Deriving
+     them here keeps the template contract unchanged. */
+  function uploadBase(url) {
+    return String(url || '').split('#')[0].split('?')[0].replace(/\/+$/, '');
+  }
+
+  function albumNamespace(url) {
+    var m = /\/(?:share|view)\/([^/?#]+)/.exec(String(url || ''));
+    return m ? m[1] : 'default';
+  }
+
+  function clamp(value, max) {
+    if (typeof value !== 'number' || !isFinite(value)) return 0;
+    return Math.max(0, Math.min(Math.floor(value), max));
+  }
+
+  function pctOf(loaded, total) {
+    return total ? Math.floor((loaded / total) * 100) : 0;
+  }
+
   function Uploader(options) {
     this.url = options.url;
+    this.chunkBase = uploadBase(options.url);
+    this.resumeStore = new ResumeStore(albumNamespace(options.url));
     this.dropZone = options.dropZone || null;
     this.fileInput = options.fileInput || null;
     this.listEl = options.listEl;
@@ -138,10 +351,19 @@
         processingAt: 0,
         stalled: false,
         stallAbort: false,
+        // Chunked-path state.
+        cancelled: false,     // an abort must stop the chunk loop, not just the socket
+        runId: 0,             // fences a superseded loop off from a fresh one
+        clientKey: null,
+        uploadId: null,
+        completedBytes: 0,    // bytes the server has confirmed on disk
       };
       self._buildRow(item);
       self.items.push(item);
       self.listEl.appendChild(item.nodes.root);
+      /* Probed on add rather than on start: the user should be told the file is
+         resumable while deciding whether to upload it, not after committing. */
+      self._prepareResume(item);
     });
     this._syncSubmit();
     this.onSelectionChange(this.items.length);
@@ -190,6 +412,10 @@
   };
 
   Uploader.prototype.removeItem = function (item) {
+    /* Set before the abort, and unconditionally: a pending row may still have
+       a resume probe in flight, and the chunk loop must not queue another
+       request after the socket it was watching goes away. */
+    item.cancelled = true;
     if (item.status === 'uploading' || item.status === 'processing') {
       if (item.xhr) item.xhr.abort();
     }
@@ -209,6 +435,7 @@
     // user-driven, so it must not be reported as a stall failure.
     if (item.stalled && item.xhr) {
       item.stallAbort = false;
+      item.cancelled = true;
       item.xhr.abort();
     }
     item.retries = 0;
@@ -216,7 +443,7 @@
     this._setStatus(item, 'pending', 'Pending');
     var self = this;
     this._startWatchdog();
-    this._uploadOne(item).then(function () {
+    this._upload(item).then(function () {
       self._renderTotal();
       self._maybeFinish();
     });
@@ -243,6 +470,9 @@
     return (last.loaded - first.loaded) / dt;
   };
 
+  /* The chunked path feeds this `completedBytes + e.loaded` for the chunk in
+     flight, so `loaded` stays whole-file absolute and every consumer below —
+     the window, the ETA, the byte-weighted total bar — works unchanged. */
   Uploader.prototype._onProgress = function (item, loaded, total) {
     item.loaded = loaded;
     var now = Date.now();
@@ -290,7 +520,11 @@
 
   /* Runs while anything is in flight. Uploading rows are judged on idle time
      since the last progress event; processing rows get a live elapsed counter
-     so a long server-side conversion reads as working, not frozen. */
+     so a long server-side conversion reads as working, not frozen.
+
+     On the chunked path item.xhr is the chunk currently in flight, so the
+     abort below still lands on a live socket — and _uploadChunked treats any
+     abort as terminal for the whole loop rather than for one request. */
   Uploader.prototype._checkStalls = function () {
     var self = this;
     var now = Date.now();
@@ -329,6 +563,134 @@
     clearInterval(this._watchdog);
     this._watchdog = null;
   };
+
+  // ── Transport selection ───────────────────────────────────────────────────
+
+  /* Chunking needs SHA-256 per chunk, which needs a secure context. Without it
+     the only honest option is the legacy path — it may hit an edge body limit
+     for very large files, but that is exactly today's behaviour, not a
+     regression introduced here. */
+  Uploader.prototype._canChunk = function (file) {
+    return file.size > CHUNK_THRESHOLD && !!subtleCrypto();
+  };
+
+  /* Single entry point for starting (or restarting) an item.
+
+     Every run gets a fresh id, and the chunk loop compares its captured id
+     against the item's on each step. That closes a race an `item.cancelled`
+     flag cannot close on its own: abort() settles its promise in a microtask,
+     by which time a synchronous retryItem() has already cleared the flag and
+     the superseded loop would happily fire the next chunk. */
+  Uploader.prototype._upload = function (item) {
+    item.runId = (item.runId || 0) + 1;
+    item.cancelled = false;
+    return this._canChunk(item.file) ? this._uploadChunked(item) : this._uploadOne(item);
+  };
+
+  /* One request in either protocol. Resolves — never rejects — with a uniform
+     outcome so the chunk loop can branch on status without try/catch around
+     every step. `item.xhr` is repointed here, which is what keeps removeItem,
+     retryItem and the stall watchdog working per chunk with no changes.
+
+     xhr.timeout is left unset for the same reason as the legacy path: it caps
+     total request duration, and a chunk on a bad connection is slow, not dead.
+     The watchdog decides what "dead" means. */
+  Uploader.prototype._request = function (item, opts) {
+    return new Promise(function (resolve) {
+      var xhr = new XMLHttpRequest();
+      item.xhr = xhr;
+
+      xhr.open(opts.method, opts.url, true);
+      xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      if (opts.contentType) xhr.setRequestHeader('Content-Type', opts.contentType);
+      if (opts.headers) {
+        Object.keys(opts.headers).forEach(function (name) {
+          xhr.setRequestHeader(name, opts.headers[name]);
+        });
+      }
+      if (opts.onProgress) {
+        xhr.upload.onprogress = function (e) {
+          if (e.lengthComputable) opts.onProgress(e);
+        };
+      }
+
+      var settled = false;
+      function settle(outcome) {
+        if (settled) return;
+        settled = true;
+        resolve(outcome);
+      }
+
+      xhr.onload = function () {
+        var body = null;
+        try { body = JSON.parse(xhr.responseText); } catch (e) { /* non-JSON */ }
+        settle({ status: xhr.status, body: body });
+      };
+      xhr.onerror = function () { settle({ status: 0, body: null, network: true }); };
+      xhr.ontimeout = function () { settle({ status: 0, body: null, network: true }); };
+      xhr.onabort = function () { settle({ status: 0, body: null, aborted: true }); };
+
+      xhr.send(opts.body == null ? null : opts.body);
+    });
+  };
+
+  // ── Resume probe ──────────────────────────────────────────────────────────
+
+  /* Best-effort, fire-and-forget: a failure here only costs resumability.
+     Runs on file add so a recovered percentage is visible before the user
+     commits to uploading. */
+  Uploader.prototype._prepareResume = function (item) {
+    var self = this;
+    if (!this._canChunk(item.file)) return;
+
+    // Still pending, still in the list, still this file.
+    function stillRelevant() {
+      return !item.cancelled && item.status === 'pending';
+    }
+
+    sha256Hex(fingerprintSource(item.file)).then(function (key) {
+      if (!key || !stillRelevant()) return;
+      item.clientKey = key;
+
+      var uploadId = self.resumeStore.get(key);
+      if (!uploadId) return;
+
+      return self._request(item, {
+        method: 'GET',
+        url: self.chunkBase + '/status/' + encodeURIComponent(uploadId),
+      }).then(function (res) {
+        if (!stillRelevant()) return;
+        var body = res.body;
+
+        /* 404 means unknown, expired or already completed — the protocol is
+           explicit that the client treats all three identically. A size
+           mismatch means the key collided with a different file. Either way
+           the mapping is dead; a network error is not, so leave it alone. */
+        if (res.status === 404 || (res.status === 200 && body && body.total_size !== item.file.size)) {
+          self.resumeStore.evict(key);
+          return;
+        }
+        if (res.status !== 200 || !body) return;
+
+        var received = clamp(body.received_bytes, item.file.size);
+        if (received <= 0) return;
+
+        item.uploadId = uploadId;
+        item.completedBytes = received;
+        item.loaded = received;
+
+        var pct = pctOf(received, item.file.size);
+        self._setStatus(item, 'pending', 'Resuming at ' + pct + '%');
+        item.nodes.root.classList.add('is-resumable');
+        item.nodes.bar.style.width = pct + '%';
+        item.nodes.meta.textContent =
+          humanSize(received) + ' of ' + humanSize(item.file.size) + ' already uploaded';
+        self._renderTotal();
+      });
+    }).catch(function () { /* resumability is a bonus; never let it break an upload */ });
+  };
+
+  // ── Legacy single-request transport ───────────────────────────────────────
 
   Uploader.prototype._uploadOne = function (item) {
     var self = this;
@@ -418,6 +780,321 @@
     });
   };
 
+  // ── Chunked transport ─────────────────────────────────────────────────────
+
+  /* init -> chunk* -> complete, per docs/upload_protocol.md. Written as a
+     hand-rolled loop of mutually-tail-calling steps rather than a chain,
+     because 409 (re-seek) and 404 (re-init) both jump backwards and a chain
+     cannot express that without unwinding.
+
+     Resolves — never rejects — exactly like _uploadOne, so start() and
+     retryItem() cannot tell the two transports apart. */
+  Uploader.prototype._uploadChunked = function (item) {
+    var self = this;
+    var runId = item.runId;
+    var base = this.chunkBase;
+    var chunkSize = CHUNK_SIZE;   // overridden by the server's init response
+    var chunkRetries = 0;         // MAX_AUTO_RETRIES is per chunk, not per file
+    var resyncs = 0;              // consecutive 409s
+    var restarts = 0;             // 404 -> fresh session
+
+    return new Promise(function (resolve) {
+      self._startWatchdog();
+
+      item.samples = [];
+      item.startedAt = Date.now();
+      item.lastProgressAt = item.startedAt;
+      item.processingAt = 0;
+      item.stallAbort = false;
+      /* Not zero: a resumed row already has confirmed bytes on the server, and
+         `loaded` is whole-file absolute throughout. */
+      item.completedBytes = clamp(item.completedBytes, item.file.size);
+      item.loaded = item.completedBytes;
+      self._setStatus(item, 'uploading', pctOf(item.loaded, item.file.size) + '%');
+      item.nodes.bar.style.width = pctOf(item.loaded, item.file.size) + '%';
+
+      /* The loop terminator. `cancelled` covers removeItem and reset;
+         the runId comparison covers a run superseded by retryItem. */
+      function stopped() {
+        return item.cancelled || item.runId !== runId;
+      }
+
+      // The row is gone or superseded — leave the DOM alone and stand down.
+      function bail() { resolve(); }
+
+      function giveUp(message) {
+        item.error = message;
+        self._setStatus(item, 'error', message);
+        self._renderTotal();
+        resolve();
+      }
+
+      /* An abort is the one outcome that always ends the loop. The watchdog's
+         stall abort is a failure; every other abort is the user removing,
+         retrying or resetting the row, and has already been reported. */
+      function afterAbort() {
+        if (item.stallAbort) {
+          item.stallAbort = false;
+          giveUp('Stalled — no data for ' + humanDuration(STALL_FAIL_MS));
+          return;
+        }
+        resolve();
+      }
+
+      function retryStep(step, message, delayMs) {
+        if (chunkRetries >= MAX_AUTO_RETRIES) {
+          giveUp(message);
+          return;
+        }
+        chunkRetries++;
+        /* The window is about to see `loaded` jump backwards to the start of
+           the chunk; keeping the old samples would produce a negative rate. */
+        item.samples = [];
+        self._setStatus(item, 'uploading', 'Retrying…');
+        // A deliberate backoff is not a stall — don't let the watchdog count it.
+        item.lastProgressAt = Date.now();
+        setTimeout(function () {
+          if (stopped()) return bail();
+          item.lastProgressAt = Date.now();
+          step();
+        }, delayMs || RETRY_DELAY_MS);
+      }
+
+      /* _prepareResume computes the fingerprint on file add, but it is async and
+         the user can hit Upload before it lands — and it can legitimately come
+         back null if subtle fails at runtime. Without a client_key the chunked
+         protocol has nothing to key its session on, so fall back to the legacy
+         transport rather than sending a request `init` will reject. */
+      function begin() {
+        if (item.clientKey) return init();
+        sha256Hex(fingerprintSource(item.file)).then(function (key) {
+          if (stopped()) return bail();
+          if (!key) return self._uploadOne(item).then(resolve);
+          item.clientKey = key;
+          init();
+        });
+      }
+
+      function seekTo(offset) {
+        item.completedBytes = clamp(offset, item.file.size);
+        item.samples = [];
+        self._onProgress(item, item.completedBytes, item.file.size);
+      }
+
+      // §6.1 — idempotent on client_key, so this doubles as the resume call.
+      function init() {
+        if (stopped()) return bail();
+        self._request(item, {
+          method: 'POST',
+          url: base + '/init',
+          contentType: 'application/json',
+          body: JSON.stringify({
+            client_key: item.clientKey,
+            filename: item.file.name,
+            total_size: item.file.size,
+            content_type: item.file.type || 'application/octet-stream',
+          }),
+        }).then(function (res) {
+          if (res.aborted) return afterAbort();
+          if (stopped()) return bail();
+          if (res.network) return retryStep(init, 'Network error');
+
+          if (res.status === 200 || res.status === 201) {
+            var body = res.body || {};
+            if (!body.upload_id) return giveUp('Upload failed (no session id)');
+            item.uploadId = body.upload_id;
+            if (body.chunk_size > 0) chunkSize = body.chunk_size;
+            self.resumeStore.set(item.clientKey, item.uploadId);
+            /* The server's counter wins over anything the status probe told
+               us earlier — it is the value the next X-Upload-Offset must
+               match, and it may have moved in another tab. */
+            seekTo(body.received_bytes);
+            chunkRetries = 0;
+            return sendChunk();
+          }
+          if (res.status >= 500) return retryStep(init, errorForStatus(res.status, res.body));
+          if (res.status === 429) {
+            return retryStep(init, errorForStatus(429, res.body), RATE_LIMIT_DELAY_MS);
+          }
+          giveUp(errorForStatus(res.status, res.body));
+        });
+      }
+
+      // §6.3 — raw bytes, offset and digest in headers.
+      function sendChunk() {
+        if (stopped()) return bail();
+        if (item.completedBytes >= item.file.size) return complete();
+
+        var start = item.completedBytes;
+        var end = Math.min(start + chunkSize, item.file.size);
+
+        readSlice(item.file, start, end).then(function (buffer) {
+          if (stopped()) return bail();
+          return sha256Hex(buffer).then(function (digest) {
+            if (stopped()) return bail();
+            /* _canChunk already established subtle exists; a null here means
+               it failed mid-flight, and sending an unverifiable chunk would
+               just earn a 422 forever. */
+            if (!digest) return giveUp('Could not checksum this file in your browser');
+
+            return self._request(item, {
+              method: 'POST',
+              url: base + '/chunk/' + encodeURIComponent(item.uploadId),
+              contentType: 'application/octet-stream',
+              headers: {
+                'X-Upload-Offset': String(start),
+                'X-Chunk-SHA256': digest,
+              },
+              body: buffer,
+              onProgress: function (e) {
+                self._onProgress(item, start + e.loaded, item.file.size);
+              },
+            }).then(function (res) { onChunkResponse(res, end); });
+          });
+        }, function () {
+          /* The File handle went stale — the file was moved, renamed or
+             replaced on disk mid-upload. Retrying reads the same dead handle. */
+          if (stopped()) return bail();
+          giveUp('Could not read the file — it may have been moved or changed');
+        }).catch(function () {
+          // Belt and braces: never leave the promise unsettled on a surprise.
+          if (!stopped()) giveUp('Upload failed');
+          resolve();
+        });
+      }
+
+      function onChunkResponse(res, end) {
+        if (res.aborted) return afterAbort();
+        if (stopped()) return bail();
+        if (res.network) return retryStep(sendChunk, 'Network error');
+
+        if (res.status === 200) {
+          var received = res.body && res.body.received_bytes;
+          item.completedBytes = typeof received === 'number'
+            ? clamp(received, item.file.size)
+            : end;
+          chunkRetries = 0;
+          resyncs = 0;
+          self._onProgress(item, item.completedBytes, item.file.size);
+          return sendChunk();
+        }
+
+        if (res.status === 409) {
+          /* Not an error. This is how a resuming client discovers where to
+             seek, and two tabs racing the same session produce it legitimately.
+             It costs no retry budget — but a server that keeps answering 409
+             without the offset advancing is a livelock, so cap it. */
+          var truth = res.body && res.body.received_bytes;
+          if (typeof truth !== 'number' || ++resyncs > MAX_OFFSET_RESYNCS) {
+            return giveUp('Upload is out of sync — retry to start it over');
+          }
+          seekTo(truth);
+          return sendChunk();
+        }
+
+        if (res.status === 422) {
+          // Bytes arrived corrupt. Same offset, same chunk, fresh attempt.
+          return retryStep(sendChunk, 'Upload corrupted in transit — retry');
+        }
+
+        if (res.status === 404) return restartSession();
+        if (res.status === 429) {
+          return retryStep(sendChunk, errorForStatus(429, res.body), RATE_LIMIT_DELAY_MS);
+        }
+        if (res.status >= 500) {
+          return retryStep(sendChunk, errorForStatus(res.status, res.body));
+        }
+        giveUp(errorForStatus(res.status, res.body));
+      }
+
+      /* The session expired or was swept while we were mid-transfer. The
+         partial file is gone with it, so there is nothing to seek to — evict
+         the mapping and start over from zero, once. */
+      function restartSession() {
+        if (restarts >= MAX_SESSION_RESTARTS) {
+          return giveUp('Upload session expired — retry to start it over');
+        }
+        restarts++;
+        self.resumeStore.evict(item.clientKey);
+        item.uploadId = null;
+        chunkRetries = 0;
+        resyncs = 0;
+        // A 404 out of `complete` leaves the row reading 'processing'; it is
+        // uploading again as of the next line.
+        self._setStatus(item, 'uploading', '0%');
+        seekTo(0);
+        init();
+      }
+
+      // §6.4 — empty body, and the same {results:[…]} envelope as the legacy
+      // endpoint, so success and per-file failure are read the same way here.
+      function complete() {
+        if (stopped()) return bail();
+
+        /* 'processing' starts here, not when the last chunk landed. Those bytes
+           only reached a .part file; validation, HEIC conversion and
+           thumbnailing all happen inside this request. */
+        item.loaded = item.file.size;
+        item.processingAt = Date.now();
+        self._setStatus(item, 'processing', 'Processing…');
+        self._renderTotal();
+
+        self._request(item, {
+          method: 'POST',
+          url: base + '/complete/' + encodeURIComponent(item.uploadId),
+        }).then(function (res) {
+          if (res.aborted) return afterAbort();
+          if (stopped()) return bail();
+          if (res.network) return retryStep(complete, 'Network error');
+          if (res.status === 404) return restartSession();
+
+          if (res.status === 409) {
+            /* The server has fewer bytes than we think it does — a chunk we
+               counted as accepted did not survive. Same re-seek as mid-stream,
+               against the same livelock guard, and the row goes back to
+               'uploading' because that is what it is doing again. */
+            var truth = res.body && res.body.received_bytes;
+            if (typeof truth !== 'number' || ++resyncs > MAX_OFFSET_RESYNCS) {
+              return giveUp('Upload is out of sync — retry to start it over');
+            }
+            self._setStatus(item, 'uploading', '0%');
+            seekTo(truth);
+            return sendChunk();
+          }
+
+          if (res.status < 200 || res.status >= 300) {
+            if (res.status >= 500) {
+              return retryStep(complete, errorForStatus(res.status, res.body));
+            }
+            if (res.status === 429) {
+              return retryStep(complete, errorForStatus(429, res.body), RATE_LIMIT_DELAY_MS);
+            }
+            return giveUp(errorForStatus(res.status, res.body));
+          }
+
+          /* Whatever comes back, the session is finished server-side — keep
+             localStorage from accumulating dead mappings. */
+          self.resumeStore.evict(item.clientKey);
+
+          var result = res.body && res.body.results && res.body.results[0];
+          if (result && result.success) {
+            item.loaded = item.file.size;
+            self._setStatus(item, 'done', '✓ Done');
+            self._renderTotal();
+            resolve();
+            return;
+          }
+          /* A validation failure rides inside results with HTTP 200 — it is a
+             verdict on the file, not a transport fault, and re-sending the
+             same bytes would earn the same verdict. */
+          giveUp((result && result.error) || (res.body && res.body.error) || 'Upload failed');
+        });
+      }
+
+      begin();
+    });
+  };
+
   Uploader.prototype._renderTotal = function () {
     if (!this.totalBar) return;
     var sent = 0, total = 0;
@@ -466,7 +1143,7 @@
     function worker() {
       if (next >= queue.length) return Promise.resolve();
       var item = queue[next++];
-      return self._uploadOne(item).then(worker);
+      return self._upload(item).then(worker);
     }
 
     var workers = [];
@@ -483,7 +1160,14 @@
 
   Uploader.prototype.reset = function () {
     this._stopWatchdog();
-    this.items.forEach(function (it) { if (it.xhr) it.xhr.abort(); });
+    /* Flag before aborting: the chunk loop checks `cancelled` on the way out
+       of every request, and an abort alone would only kill the chunk in flight.
+       Sessions are deliberately left in localStorage — the user cleared the
+       list, not the upload, and re-adding the file should still resume. */
+    this.items.forEach(function (it) {
+      it.cancelled = true;
+      if (it.xhr) it.xhr.abort();
+    });
     this.items = [];
     this.listEl.innerHTML = '';
     this.running = false;

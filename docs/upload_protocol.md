@@ -166,6 +166,11 @@ Idempotent on `(user_id, album_id, client_key)`. Re-initialising an in-flight up
 existing session with `resumed: true` and its true `received_bytes` — it never restarts the
 transfer or orphans the `.part` file.
 
+**`init` is authoritative over the `status` probe.** The two can legitimately disagree: another tab
+may have advanced the session between the probe and the upload starting. Treat `status` as
+presentation only — it is what lets the UI say "Resuming at 51%" before the user commits — and take
+the offset to actually transmit from `init`.
+
 ### 6.2 `GET /share/<token>/upload/status/<upload_id>`
 
 ```jsonc
@@ -215,6 +220,19 @@ Empty body. Returns the **same envelope as the legacy endpoint**, so
 Per-file problems ride inside `results` with HTTP 200, matching `do_upload`. Reserve 4xx for
 transport- and session-level faults.
 
+**`complete` can also return `409`**, with the same shape as the chunk endpoint:
+
+```jsonc
+// 409 Conflict — the partial is short of total_size
+{ "error": "…", "received_bytes": 486539264 }
+```
+
+This is not merely defensive. It is the real case where a chunk was acknowledged but did not
+survive — the client believes it sent everything, the server disagrees, and the byte count is the
+tiebreaker. The client re-seeks to the returned offset and resumes sending chunks rather than
+failing the upload. Guard the re-seek with a consecutive-409 cap so a server stuck at a fixed
+offset cannot livelock the client.
+
 ---
 
 ## 7. `client_key` derivation
@@ -241,7 +259,7 @@ correctly starts a new session rather than resuming into a mismatched prefix.
 | `400` | Malformed headers or JSON | Fail permanently | Yes |
 | `403` | Uploads disabled, or session not owned by caller | Fail permanently | Yes |
 | `404` | Album or session unknown/expired | Evict mapping, re-init | No |
-| `409` | **Offset mismatch** — body carries true `received_bytes` | Re-seek, continue | **No** |
+| `409` | **Offset mismatch** — body carries true `received_bytes`. From `chunk` (wrong offset) or from `complete` (partial is short) | Re-seek, continue | **No** |
 | `413` | `total_size` exceeds `MAX_CONTENT_LENGTH`, or chunk overruns `total_size` | Fail permanently | Yes |
 | `422` | **Checksum mismatch** — chunk corrupt in transit | Retry the same chunk | **Yes** |
 | `429` | Quota or rate limit hit | Back off, surface to user | — |
