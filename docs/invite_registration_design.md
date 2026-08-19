@@ -264,7 +264,11 @@ this is the single most important line in the feature.
 
 When SMTP fails, or is not configured at all (a self-hoster who does not want a mail relay),
 the admin needs a way to hand over the link. `POST /admin/invite/<id>/link` **rotates** the
-token and flashes the fresh URL once, with a "copy" button. This makes SMTP genuinely optional
+token and flashes the fresh URL once, with a "copy" button. It deliberately **does not** take the
+resend cooldown: that cooldown exists because sending mail to a third party on request is a
+mail-bomb primitive, and this route sends none. Gating it would disable the SMTP fallback for
+exactly the minute after a failed send — the moment it is most needed. Rotation is still bounded
+by the route's 30/hour limit. This makes SMTP genuinely optional
 rather than a hard dependency of the whole registration system, and it is the thing to reach
 for when an invite lands in someone's spam folder.
 

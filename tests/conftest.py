@@ -211,8 +211,8 @@ class Ref:
         return f"Ref({self.__dict__})"
 
 
-def _make_user(username, email, password="correct horse battery staple"):
-    user = User(username=username, email=email, is_admin=False)
+def _make_user(username, email, password="correct horse battery staple", is_admin=False):
+    user = User(username=username, email=email, is_admin=is_admin)
     # set_password runs 600k PBKDF2 rounds; assigning the hash directly keeps
     # the suite fast. No test authenticates by password — see `login`.
     user.password_hash = "pbkdf2:sha256:600000$test$deadbeef"
@@ -233,6 +233,18 @@ def other_user(app):
     """A second, unrelated user — used to prove sessions are not cross-reachable."""
     with app.app_context():
         return _make_user("mallory", "mallory@example.com")
+
+
+@pytest.fixture
+def admin_user(app):
+    """An administrator — the only identity the /admin routes answer to.
+
+    Separate from ``user`` rather than a flag on it, because the invite tests need
+    both at once: one caller who may issue invites and one who may not, in the same
+    test, to show the authorisation boundary is a boundary and not a redirect.
+    """
+    with app.app_context():
+        return _make_user("root", "root@example.com", is_admin=True)
 
 
 @pytest.fixture
@@ -270,6 +282,14 @@ def client(app, user):
     """A test client logged in as ``user``."""
     test_client = app.test_client()
     login(test_client, user)
+    return test_client
+
+
+@pytest.fixture
+def admin_client(app, admin_user):
+    """A test client logged in as ``admin_user``."""
+    test_client = app.test_client()
+    login(test_client, admin_user)
     return test_client
 
 
