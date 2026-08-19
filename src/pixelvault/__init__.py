@@ -60,6 +60,16 @@ def create_app():
     app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
 
+    # The upload caps come from independent env vars that have to agree, and a
+    # disagreement is otherwise invisible: the operator sees uploads refused at init
+    # with nothing tying that back to the configuration. Logged, not raised — see
+    # validate_upload_limits() for why a contradictory pairing must not stop boot.
+    for severity, message in validate_upload_limits():
+        if severity == 'error':
+            app.logger.error('Upload limit misconfiguration: %s', message)
+        else:
+            app.logger.warning('Upload limit advisory: %s', message)
+
     # ── Extensions ─────────────────────────────────────────────────────────
     _validate_mail_config()
     db.init_app(app)

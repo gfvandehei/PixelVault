@@ -38,6 +38,7 @@ All endpoints are `@login_required` and scoped to an album share token.
 | `GET` | `/share/<token>/upload/status/<upload_id>` | Probe resume offset |
 | `POST` | `/share/<token>/upload/chunk/<upload_id>` | Append one chunk |
 | `POST` | `/share/<token>/upload/complete/<upload_id>` | Assemble, validate, commit |
+| `DELETE` | `/share/<token>/upload/cancel/<upload_id>` | Abandon a session and release its quota |
 
 The legacy `POST /share/<token>/upload` remains for files under the threshold and is **not
 modified**.
@@ -127,8 +128,10 @@ stateDiagram-v2
     Open --> Open: 422 bad checksum<br/>(no state change)
     Open --> Complete: received_bytes == total_size<br/>then complete succeeds
     Open --> Expired: no activity for TTL
+    Open --> Cancelled: cancel<br/>(user removed the file)
     Complete --> [*]: session row deleted, Photo row created
     Expired --> [*]: swept by cleanup, .part unlinked
+    Cancelled --> [*]: session row deleted, .part unlinked
 ```
 
 There is no explicit "assembling" state. Because chunks append in place, the `.part` file *is* the
@@ -241,6 +244,38 @@ tiebreaker. The client re-seeks to the returned offset and resumes sending chunk
 failing the upload. Guard the re-seek with a consecutive-409 cap so a server stuck at a fixed
 offset cannot livelock the client.
 
+### 6.5 `DELETE /share/<token>/upload/cancel/<upload_id>`
+
+Empty body. Deletes the session row and unlinks its `.part`, returning the reservation to the
+caller's in-flight quota immediately instead of at the end of the 24 h TTL.
+
+```jsonc
+// 200 OK — there was a session and it is gone
+{ "cancelled": true }
+
+// 200 OK — there was nothing to cancel (already cancelled, completed, swept,
+//          or the handle belongs to another user)
+{ "cancelled": false }
+```
+
+Three deliberate asymmetries with the other four endpoints:
+
+- **Always 200, never 404.** Cancel is idempotent, and the client fires it without waiting for a
+  reply. A retry, a double click, or a handle the sweep already collected must all read as "the
+  session is not there", which is the outcome the caller wanted.
+- **Not gated on `allow_upload`.** Revoking uploads on an album must not strand its guests' existing
+  reservations — releasing quota is the one upload operation that is still safe once the album is
+  closed.
+- **Scoped to `current_user` and the album.** A handle belonging to somebody else is reported as
+  `cancelled: false` and their row survives, indistinguishable from an unknown handle.
+
+A chunk racing the delete is safe: `append_chunk` holds a `flock` on the partial and re-reads the
+row under it, so it observes the deletion and answers `404`.
+
+The client sends this only from `removeItem` — an explicit "I don't want this file" — never from a
+terminal error, whose session is the only reason its Retry button resumes rather than restarts from
+zero. See [upload_client.md](upload_client.md).
+
 ---
 
 ## 7. `client_key` derivation
@@ -262,7 +297,7 @@ correctly starts a new session rather than resuming into a mismatched prefix.
 
 | Code | Meaning | Client action | Rate-charged? |
 |---|---|---|---|
-| `200` | Chunk accepted / status / complete | Continue | No |
+| `200` | Chunk accepted / status / complete / cancel | Continue | No |
 | `201` | New session created | Continue | No |
 | `400` | Malformed headers or JSON, or a missing/blank `X-Chunk-SHA256` | Fail permanently | Yes |
 | `403` | Uploads disabled on the album | Fail permanently | Yes |
@@ -271,6 +306,13 @@ correctly starts a new session rather than resuming into a mismatched prefix.
 | `413` | `total_size` exceeds `MAX_CONTENT_LENGTH`, or chunk overruns `total_size` | Fail permanently | Yes |
 | `422` | **Checksum mismatch** — chunk corrupt in transit | Retry the same chunk | **Yes** |
 | `429` | Quota or rate limit hit | Back off, surface to user | — |
+
+A quota `429` from `init` carries the numbers alongside the message, so a client need not parse
+prose: `limit_bytes`, `required_bytes` and `inflight_bytes` for the byte cap, `open_sessions` and
+`max_sessions` for the session cap. A rate-limit `429` carries neither.
+
+`cancel` is the exception to that table: it answers `200` for every outcome, including an unknown,
+expired, or foreign handle. See §6.5 for why.
 
 A session belonging to another user returns `404`, not `403`. The lookup is scoped by
 `user_id` and `album_id`, so a foreign handle simply does not resolve — and that is the right
@@ -348,7 +390,7 @@ without buffering 8 MiB, and once under the lock, where it is the authority.
 
 ## 10. Limits
 
-Chunking removes protections the app currently relies on. All four are mandatory.
+Chunking removes protections the app currently relies on. All of these are mandatory.
 
 | Control | Where | Why |
 |---|---|---|
@@ -358,6 +400,8 @@ Chunking removes protections the app currently relies on. All four are mandatory
 | Per-route `request.max_content_length` | `chunk` | The chunk endpoint has no business accepting 500 MB |
 | Session discard on album delete | `albums.py` | Deleting an album reclaims its in-flight sessions and `.part` files; an ORM cascade would drop the rows and leave the files as invisible orphans |
 | Session discard on a failed `complete` | `complete` | A store that raises must not strand the partial and its quota slot for the full TTL |
+| Session discard on cancel | `cancel` | A file the user removed from the queue holds its full declared size against the quota for 24 h otherwise — the common way a user hits the in-flight cap without having anything actually uploading |
+| Coherence of the caps themselves | boot | `validate_upload_limits()` in `config.py` logs when the env vars contradict each other — most importantly `MAX_INFLIGHT_UPLOAD_MB_PER_USER < MAX_UPLOAD_MB`, which makes every large file impossible to upload with nothing in the logs tying the refusal back to configuration |
 
 The DB-backed quotas are the **load-bearing** defence. The rate limiter is secondary damping:
 `storage_uri="memory://"` with 2 workers means limits are per-process and reset on every deploy.

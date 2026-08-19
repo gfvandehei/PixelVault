@@ -13,6 +13,7 @@ services:
       - UPLOAD_FOLDER=/app/uploads
       - DATABASE_URL=sqlite:////app/instance/pixelvault.db
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-500}
+      - MAX_INFLIGHT_UPLOAD_MB_PER_USER=${MAX_INFLIGHT_UPLOAD_MB_PER_USER:-1500}
       - FLASK_DEBUG=false
       # Mail & invites (docs/configuration.md §5, docs/registration_invites.md).
       # Enumerated explicitly, like everything above: this list *is* the container's

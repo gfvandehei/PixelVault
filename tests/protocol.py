@@ -12,6 +12,7 @@ The method bodies deliberately mirror ``static/js/uploader.js``:
     status()    <- Uploader.prototype._prepareResume
     chunk()     <- Uploader.prototype._uploadChunked / sendChunk()
     complete()  <- Uploader.prototype._uploadChunked / complete()
+    cancel()    <- Uploader.prototype._cancelSession
 
 Anything here that the JS does not do is a bug in this file, not a licence for
 the server to accept it.
@@ -110,6 +111,12 @@ class ProtocolClient:
     def complete(self, upload_id):
         """POST /upload/complete/<upload_id> with an empty body."""
         return self.client.post(f"{self.base}/complete/{upload_id}")
+
+    # ── §6.5 cancel ────────────────────────────────────────────────────────
+
+    def cancel(self, upload_id):
+        """DELETE /upload/cancel/<upload_id> — what removeItem fires, body-less."""
+        return self.client.delete(f"{self.base}/cancel/{upload_id}")
 
     # ── Composite flows ────────────────────────────────────────────────────
 
