@@ -2,10 +2,39 @@
 {% block title %}Access Required — PixelVault{% endblock %}
 
 {% block content %}
+{#
+  Where a share-link visitor with no account lands. Until invites, this page was a
+  dead end that happened to work: every album route is @login_required, so the
+  visitor followed the "Sign up" link and registered themselves. That path is gone
+  (design §8, §11 Q6), so the page has to answer the question it used to dodge —
+  who do I ask?
+
+  The address comes from ADMIN_CONTACT (injected app-wide by routes/auth.py, and
+  falling back to MAIL_FROM). A self-hosted box may have neither set, so the copy
+  degrades to advice that is still actionable — the person who sent the link can
+  always reach whoever runs the server — rather than rendering a blank space where
+  a name should be.
+#}
 <div class="empty-state" style="padding: 6rem 2rem;">
   <div class="icon">🔒</div>
   <h3>Access Required</h3>
   <p>You need to be signed in to view this album.</p>
   <a href="{{ url_for('login', next=request.url) }}" class="btn btn-primary">Sign in to continue</a>
+
+  <p style="margin-top: 2rem; font-size: 0.9rem;">
+    Don't have an account? PixelVault is invite-only, so accounts are created from an
+    invitation link rather than a sign-up form.
+    {% if admin_contact %}
+      Ask
+      {% if '@' in admin_contact %}
+        <a href="mailto:{{ admin_contact }}">{{ admin_contact }}</a>
+      {% else %}
+        {{ admin_contact }}
+      {% endif %}
+      for one.
+    {% else %}
+      Ask the person who shared this album for an invitation.
+    {% endif %}
+  </p>
 </div>
 {% endblock %}
