@@ -504,6 +504,23 @@ def check_resend_allowed(invite, *, cooldown_seconds=INVITE_RESEND_COOLDOWN_SECO
 `consume` creates the user, stamps `accepted_at` / `accepted_user_id` and nulls `token_hash` in
 one transaction.
 
+Three behaviours are fixed here because they are seams where independently built modules drift:
+
+* **`rotate` is the only renewal path.** Resend, copy-link, and the *Send invite* button on a
+  `LEGACY` row all call it. `issue` is strictly for an address never seen before.
+* **`rotate` does not clear `last_send_error`.** `mark_sent` does. The correct resend sequence is
+  `check_resend_allowed` → `rotate` → send → `mark_sent(error=...)` **on both outcomes**; skipping
+  it on the failure path leaves `send_count` undercounting and the panel showing no error.
+* **A consumed link is indistinguishable from a typo.** `consume` nulls `token_hash`, so replaying
+  a used link raises `InvalidInvite`, never `AlreadyAccepted`. The acceptance page must word that
+  message for both audiences at once.
+
+**Accepted limitation:** a duplicate address given to `issue`, and a username collision inside
+`consume`, both raise the base `InviteError` rather than a dedicated subclass. Both are backstops
+for a race — §7.1 has the admin route check for an existing `AllowedEmail` first, and the
+acceptance route checks username availability first, exactly as `/register` does today. Two admins
+adding one address in the same second is rare enough that a generic message is the right cost.
+
 ### `emails.py` — content
 
 ```python
