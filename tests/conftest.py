@@ -67,6 +67,16 @@ TEST_MAX_INFLIGHT_MB = 4
 #: Per-user open-session quota. Three, so the test needs four inits, not eleven.
 TEST_MAX_SESSIONS = 3
 TEST_TTL_HOURS = 24
+#: Invite link lifetime for the run. Tests that need an expired invite backdate
+#: the row rather than waiting, so the value only has to be stable, not short.
+TEST_INVITE_TTL_HOURS = 72
+TEST_INVITE_COOLDOWN_SECONDS = 60
+#: Origin every invite link in the suite is expected to be built from.
+TEST_PUBLIC_BASE_URL = "https://vault.test.invalid"
+TEST_MAIL_FROM = "pixelvault@test.invalid"
+#: Short enough that a test asserting the timeout reaches the socket can tell it
+#: apart from smtplib's own default of "no timeout".
+TEST_MAIL_TIMEOUT_SECONDS = 5
 
 _TEST_ENV = {
     "SECRET_KEY": "test-secret-key-not-used-in-production",
@@ -84,6 +94,18 @@ _TEST_ENV = {
     "ADMIN_USERNAME": "",
     "ADMIN_EMAIL": "",
     "ADMIN_PASSWORD": "",
+    # Mail: deliberately no SMTP_HOST, so build_mailer() picks ConsoleMailer and
+    # the suite has no way to open a socket even if a test forgets the `mailer`
+    # fixture. Selection tests override the module constants directly instead —
+    # see test_mailer.py.
+    "PUBLIC_BASE_URL": TEST_PUBLIC_BASE_URL,
+    "MAIL_ENABLED": "true",
+    "SMTP_HOST": "",
+    "MAIL_FROM": TEST_MAIL_FROM,
+    "MAIL_FROM_NAME": "PixelVault",
+    "MAIL_TIMEOUT_SECONDS": str(TEST_MAIL_TIMEOUT_SECONDS),
+    "INVITE_TTL_HOURS": str(TEST_INVITE_TTL_HOURS),
+    "INVITE_RESEND_COOLDOWN_SECONDS": str(TEST_INVITE_COOLDOWN_SECONDS),
 }
 os.environ.update(_TEST_ENV)
 
@@ -91,6 +113,7 @@ os.environ.update(_TEST_ENV)
 from pixelvault import create_app  # noqa: E402
 from pixelvault import uploads as uploads_module  # noqa: E402
 from pixelvault.extensions import db, limiter  # noqa: E402
+from pixelvault.mailer import MemoryMailer  # noqa: E402
 from pixelvault.models import Album, Base, Photo, UploadSession, User  # noqa: E402
 
 from .protocol import ProtocolClient  # noqa: E402
@@ -140,6 +163,25 @@ def reset_state(app):
 
 
 @pytest.fixture
+def mailer(app):
+    """Swap a :class:`MemoryMailer` in for the duration of one test.
+
+    Replaces the backend in ``app.extensions`` rather than any module global,
+    because that is where ``extensions.mailer`` resolves on every call — so code
+    that imported the proxy at load time picks this up, and the swap survives the
+    session-scoped ``app`` fixture without leaking into the next test.
+
+    Yields the MemoryMailer itself; ``.outbox`` is the list of messages that would
+    have been sent.
+    """
+    previous = app.extensions.get("mailer")
+    memory = MemoryMailer()
+    app.extensions["mailer"] = memory
+    yield memory
+    app.extensions["mailer"] = previous
+
+
+@pytest.fixture
 def upload_dir(app):
     """The directory committed media lands in, as a Path."""
     return Path(app.config["UPLOAD_FOLDER"])
@@ -169,8 +211,8 @@ class Ref:
         return f"Ref({self.__dict__})"
 
 
-def _make_user(username, email, password="correct horse battery staple"):
-    user = User(username=username, email=email, is_admin=False)
+def _make_user(username, email, password="correct horse battery staple", is_admin=False):
+    user = User(username=username, email=email, is_admin=is_admin)
     # set_password runs 600k PBKDF2 rounds; assigning the hash directly keeps
     # the suite fast. No test authenticates by password — see `login`.
     user.password_hash = "pbkdf2:sha256:600000$test$deadbeef"
@@ -191,6 +233,18 @@ def other_user(app):
     """A second, unrelated user — used to prove sessions are not cross-reachable."""
     with app.app_context():
         return _make_user("mallory", "mallory@example.com")
+
+
+@pytest.fixture
+def admin_user(app):
+    """An administrator — the only identity the /admin routes answer to.
+
+    Separate from ``user`` rather than a flag on it, because the invite tests need
+    both at once: one caller who may issue invites and one who may not, in the same
+    test, to show the authorisation boundary is a boundary and not a redirect.
+    """
+    with app.app_context():
+        return _make_user("root", "root@example.com", is_admin=True)
 
 
 @pytest.fixture
@@ -228,6 +282,14 @@ def client(app, user):
     """A test client logged in as ``user``."""
     test_client = app.test_client()
     login(test_client, user)
+    return test_client
+
+
+@pytest.fixture
+def admin_client(app, admin_user):
+    """A test client logged in as ``admin_user``."""
+    test_client = app.test_client()
+    login(test_client, admin_user)
     return test_client
 
 

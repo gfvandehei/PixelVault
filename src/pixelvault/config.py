@@ -139,3 +139,48 @@ def validate_upload_limits(max_file_bytes=None, max_inflight_bytes=None,
 # the region ProxyFix trusts, letting a caller name any IP it likes and so
 # choose its own rate-limit bucket. When unsure, set it too low.
 TRUSTED_PROXY_COUNT = int(os.environ.get('TRUSTED_PROXY_COUNT', 1))
+
+# ── Mail & invites (docs/configuration.md) ─────────────────────────────────
+# The canonical external origin invite links are built from, e.g.
+# "https://photos.example.com". Deliberately configured rather than derived
+# from url_for(_external=True): behind Cloudflare -> nginx -> Gunicorn the
+# reconstructed URL is only as trustworthy as the forwarded headers, so an
+# attacker-controlled Host on the add-email request could otherwise point an
+# invite link at a domain they own. Stored without a trailing slash so callers
+# can concatenate a path without guessing.
+PUBLIC_BASE_URL = os.environ.get('PUBLIC_BASE_URL', '').strip().rstrip('/')
+
+# false -> NullMailer: invites are still issued and their links are still
+# usable via the admin copy-link fallback, but nothing leaves the process.
+MAIL_ENABLED = os.environ.get('MAIL_ENABLED', 'true').lower() == 'true'
+
+# Unset -> ConsoleMailer, so a dev checkout boots and prints invite links to
+# the log instead of demanding a relay.
+SMTP_HOST = os.environ.get('SMTP_HOST', '').strip()
+SMTP_PORT = int(os.environ.get('SMTP_PORT', 587))
+SMTP_USERNAME = os.environ.get('SMTP_USERNAME', '').strip()
+# Not stripped: a password may legitimately begin or end with a space, and
+# Gmail app passwords are usually pasted with the grouping spaces intact.
+SMTP_PASSWORD = os.environ.get('SMTP_PASSWORD', '')
+# 'starttls' (587, upgrade in band) | 'ssl' (465, TLS from the first byte) |
+# 'none' (plaintext; only defensible for a relay on localhost).
+SMTP_SECURITY = os.environ.get('SMTP_SECURITY', 'starttls').strip().lower()
+
+MAIL_FROM = os.environ.get('MAIL_FROM', '').strip()
+MAIL_FROM_NAME = os.environ.get('MAIL_FROM_NAME', 'PixelVault').strip()
+# Socket timeout for the whole SMTP conversation. Sends happen synchronously
+# inside the admin request, and production runs 2 workers x 4 threads — without
+# a bound, one hung relay holds an eighth of the server until the OS gives up.
+MAIL_TIMEOUT_SECONDS = int(os.environ.get('MAIL_TIMEOUT_SECONDS', 10))
+
+# Address shown to accountless share-link guests so they know who to ask for an
+# invitation. Falls back to the sending address, which is nearly always right.
+ADMIN_CONTACT = os.environ.get('ADMIN_CONTACT', '').strip() or MAIL_FROM
+
+# Invite link lifetime, measured from issue or rotation. Consumed by invites.py.
+INVITE_TTL_HOURS = int(os.environ.get('INVITE_TTL_HOURS', 72))
+# Minimum gap between two sends of one invite. Not an anti-annoyance measure:
+# an invite is mail this server sends to a third party on request, so an
+# unthrottled resend button is a mail-bomb primitive aimed at whatever address
+# was typed in — and it burns the sending domain's reputation with the relay.
+INVITE_RESEND_COOLDOWN_SECONDS = int(os.environ.get('INVITE_RESEND_COOLDOWN_SECONDS', 60))

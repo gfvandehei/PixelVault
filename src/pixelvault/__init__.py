@@ -7,6 +7,12 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import sys
 
 from .extensions import db, login_manager, limiter
+# Aliased deliberately. Importing the `pixelvault.mailer` *module* — which
+# extensions does, to build a backend — binds it as an attribute of this package,
+# and a package's attributes are this file's globals. An unaliased `mailer` proxy
+# here would therefore be silently replaced by the module object.
+from .extensions import mailer as mailer_ext
+from .mailer import SECURITY_MODES
 from .config import *
 import pixelvault.utils as utils
 import logging
@@ -65,9 +71,11 @@ def create_app():
             app.logger.warning('Upload limit advisory: %s', message)
 
     # ── Extensions ─────────────────────────────────────────────────────────
+    _validate_mail_config()
     db.init_app(app)
     login_manager.init_app(app)
     limiter.init_app(app)
+    mailer_ext.init_app(app)
     # ── Routes ─────────────────────────────────────────────────────────────
     # Import after extensions are bound so decorators resolve correctly
     from .routes import register_all
@@ -135,6 +143,47 @@ def create_app():
     return app
 
 
+def _validate_mail_config():
+    """Refuse to boot on a mail configuration that would fail only at send time.
+
+    Every combination checked here produces an invite that is *issued* — the row
+    is committed before the send is attempted — and then either undeliverable or,
+    worse, deliverable but carrying a link to nowhere. Both faults surface hours
+    later, to an admin who has already told someone to expect an email, so they
+    are worth a loud crash on deploy instead.
+
+    Silence is deliberate for the unconfigured case: a dev checkout with no SMTP
+    at all must still boot, on ConsoleMailer. This only fires once an operator has
+    started configuring a relay and stopped halfway.
+    """
+    if not MAIL_ENABLED or not SMTP_HOST:
+        return  # nothing is being sent; there is nothing to be incoherent about
+
+    if SMTP_SECURITY not in SECURITY_MODES:
+        raise RuntimeError(
+            f"SMTP_SECURITY={SMTP_SECURITY!r} is not valid. "
+            f"Set it to one of: {', '.join(SECURITY_MODES)} "
+            "(587 normally wants 'starttls', 465 wants 'ssl')."
+        )
+
+    if not MAIL_FROM:
+        raise RuntimeError(
+            "SMTP_HOST is configured but MAIL_FROM is empty, so every message would be "
+            "rejected by the relay for having no sender. Set MAIL_FROM to the address "
+            "mail is sent from — with Gmail it must be the SMTP_USERNAME account itself, "
+            "because Google rewrites a From it does not own. "
+            "Set MAIL_ENABLED=false if you did not mean to send mail at all."
+        )
+
+    if not PUBLIC_BASE_URL:
+        raise RuntimeError(
+            "SMTP_HOST is configured but PUBLIC_BASE_URL is empty. Invite links are built "
+            "from that value rather than from the request's Host header, so without it "
+            "there is no origin to point an invite at. Set it to the canonical external "
+            "URL, e.g. PUBLIC_BASE_URL=https://photos.example.com."
+        )
+
+
 def _run_migrations():
     """Add new columns to existing databases without breaking old deployments."""
     from .models import Album
@@ -165,6 +214,25 @@ def _run_migrations():
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, album_id, client_key)
             )""",
+            # Invite lifecycle on allowed_email (docs/invite_registration_design.md §4).
+            # Every default here is a literal, because SQLite refuses a non-constant
+            # DEFAULT on ADD COLUMN and would otherwise leave the pre-existing rows
+            # unwritable; the nullable columns carry no default at all, which is what
+            # makes an untouched row read as LEGACY rather than as a broken invite.
+            "ALTER TABLE allowed_email ADD COLUMN token_hash VARCHAR(64)",
+            "ALTER TABLE allowed_email ADD COLUMN token_issued_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN expires_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN prefill_username VARCHAR(64) NOT NULL DEFAULT ''",
+            "ALTER TABLE allowed_email ADD COLUMN last_sent_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN send_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE allowed_email ADD COLUMN last_send_error VARCHAR(256) NOT NULL DEFAULT ''",
+            "ALTER TABLE allowed_email ADD COLUMN accepted_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN accepted_user_id INTEGER REFERENCES user(id)",
+            "ALTER TABLE allowed_email ADD COLUMN invited_by_id INTEGER REFERENCES user(id)",
+            # Named exactly as SQLAlchemy names the index=True on the column, so a
+            # database created by create_all() and one arrived at by migration end up
+            # with the same schema rather than two indexes doing one job.
+            "CREATE INDEX IF NOT EXISTS ix_allowed_email_token_hash ON allowed_email (token_hash)",
         ]:
             try:
                 conn.execute(db.text(stmt))

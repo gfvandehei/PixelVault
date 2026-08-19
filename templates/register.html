@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Sign Up — PixelVault{% endblock %}
+{% block title %}Accept Your Invitation — PixelVault{% endblock %}
 
 {% block head %}
 <style>
@@ -55,6 +55,15 @@
     color: var(--text-muted);
     margin-top: 0.3rem;
   }
+
+  /* The locked address. Styled as something settled rather than something the
+     reader failed to fill in — a plain disabled-looking box invites a support
+     question about why they cannot type in it. */
+  .locked-field input {
+    background: var(--bg);
+    color: var(--text-dim);
+    cursor: not-allowed;
+  }
 </style>
 {% endblock %}
 
@@ -62,18 +71,35 @@
 <div class="auth-wrap">
   <div class="auth-card">
     <div class="auth-logo">PixelVault<span>.</span></div>
-    <h2>Create your account</h2>
+    <h2>Accept your invitation</h2>
 
-    <form method="POST">
+    {#
+      The acceptance form. Two things about it are security properties, not layout:
+
+      * The email field has **no `name` attribute**, so the browser posts nothing for
+        it. The address the account is created with is read off the invite row in
+        `invites.consume`; a posted one is ignored even if a hand-crafted request
+        carries it. Giving the field a name would put an attacker-supplied copy of
+        the most important value in the flow one careless `request.form` away.
+      * There is no hidden token field either. The token lives in the signed session
+        (`session['invite_token']`), which the browser cannot rewrite, and keeping it
+        out of the markup keeps it out of page caches and "view source".
+    #}
+    <form method="POST" action="{{ url_for('invite_submit') }}">
+      <div class="form-group locked-field">
+        <label for="email">Email</label>
+        <input type="email" id="email" value="{{ email|default('') }}" readonly
+               tabindex="-1" aria-describedby="email-hint">
+        <p class="hint" id="email-hint">
+          Your invitation was issued for this address, so it cannot be changed here.
+          Ask an admin for a new invitation if it is wrong.
+        </p>
+      </div>
       <div class="form-group">
         <label for="username">Username</label>
         <input type="text" id="username" name="username" value="{{ username|default('') }}"
                autocomplete="username" minlength="3" maxlength="64" required autofocus>
-      </div>
-      <div class="form-group">
-        <label for="email">Email</label>
-        <input type="email" id="email" name="email" value="{{ email|default('') }}"
-               autocomplete="email" required>
+        <p class="hint">Letters, numbers, hyphens and underscores</p>
       </div>
       <div class="form-group">
         <label for="password">Password</label>

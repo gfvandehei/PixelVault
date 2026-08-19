@@ -421,8 +421,10 @@
         </div>
       </div>
     {% else %}
-      <a href="{{ url_for('login') }}">Log in</a>
-      <a href="{{ url_for('register') }}" class="btn-primary btn btn-sm">Sign up</a>
+      {# No "Sign up" button: registration is invite-only and /register no longer
+         exists, so url_for('register') here would raise BuildError on every page an
+         anonymous visitor can reach — including the invite acceptance form itself. #}
+      <a href="{{ url_for('login') }}" class="btn-primary btn btn-sm">Log in</a>
     {% endif %}
   </div>
 </nav>

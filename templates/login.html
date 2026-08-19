@@ -58,7 +58,14 @@
     <div class="auth-logo">PixelVault<span>.</span></div>
     <h2>Welcome back</h2>
 
-    <form method="POST">
+    {#
+      An explicit action, not the empty default. This page is also rendered from
+      /invite and /invite/<token> when a link is refused, so "post to whatever URL
+      you are on" would send the login form to the invite endpoint. `next` is
+      carried through by hand because that action would otherwise drop the query
+      string, sending everyone to the dashboard instead of the album they asked for.
+    #}
+    <form method="POST" action="{{ url_for('login', next=request.args.get('next')) }}">
       <div class="form-group">
         <label for="username">Username</label>
         <input type="text" id="username" name="username" value="{{ username|default('') }}"
@@ -78,8 +85,12 @@
       </button>
     </form>
 
+    {# Invite-only since #7: there is no sign-up page to link to. Saying so plainly
+       beats a missing link, which reads as a broken page and produces the support
+       question this sentence exists to answer. #}
     <div class="auth-footer">
-      Don't have an account? <a href="{{ url_for('register') }}">Sign up</a>
+      PixelVault is invite-only. Ask an admin for an invitation
+      {%- if admin_contact %} at {{ admin_contact }}{% endif %} to create an account.
     </div>
   </div>
 </div>

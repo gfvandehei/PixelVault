@@ -32,9 +32,10 @@
 
   .email-row {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
     gap: 0.75rem;
+    flex-wrap: wrap;
     padding: 0.65rem 0.9rem;
     background: var(--bg);
     border: 1px solid var(--border);
@@ -42,6 +43,60 @@
   }
 
   .email-row-info { flex: 1; min-width: 0; }
+
+  /* Two states are problems and read as such; the rest sit on the palette
+     already defined in base.html. */
+  .badge-blue { background: rgba(52, 152, 219, 0.15); color: #70a8e8; }
+  .badge-red  { background: rgba(192, 57, 43, 0.22);  color: #e87070; }
+  .badge-rust { background: rgba(192, 57, 43, 0.12);  color: #c98d84; }
+
+  .email-row-lines {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+  }
+
+  .email-row-error {
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+    color: #e87070;
+    overflow-wrap: anywhere;
+  }
+
+  .email-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  /* The copy-link flash is moved in here on load. Flashes self-destruct after
+     five seconds and this is the single rendering of a token that can never be
+     shown again, so it must not be on that clock. */
+  .invite-link-box {
+    display: none;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+    padding: 0.65rem 0.9rem;
+    background: var(--bg);
+    border: 1px solid var(--green);
+    border-radius: var(--radius);
+  }
+
+  .invite-link-url {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
 
   .email-row-addr {
     font-family: var(--font-mono);
@@ -230,50 +285,126 @@
 {% block content %}
 <div class="page-header">
   <h1>Admin Panel</h1>
-  <p>Manage authorized email addresses and view registered users.</p>
+  <p>Invite new members, track their invitations, and view registered users.</p>
 </div>
 
 <div class="admin-grid">
 
-  <!-- Allowed Emails -->
+  <!-- Invitations -->
   <div>
     <div class="card">
-      <div class="section-title">Authorized Emails</div>
+      <div class="section-title">Invitations</div>
 
       <form method="POST" action="{{ url_for('admin_add_email') }}" class="add-form">
         <div class="form-group" style="margin-bottom:0;">
-          <label for="new-email">Add Email Address</label>
+          <label for="new-email">Invite Email Address</label>
           <div class="add-form-row">
             <input type="email" id="new-email" name="email" placeholder="user@example.com" required>
-            <button type="submit" class="btn btn-primary">Add</button>
+            <button type="submit" class="btn btn-primary">Invite</button>
           </div>
         </div>
         <div class="form-group" style="margin-bottom:0;">
-          <label for="new-note">Note (optional)</label>
+          <label for="new-note">Note (optional, admin-only)</label>
           <input type="text" id="new-note" name="note" placeholder="e.g. Alice's account" maxlength="256">
         </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label for="new-username">Suggested username (optional)</label>
+          <input type="text" id="new-username" name="prefill_username" placeholder="e.g. alice" maxlength="64">
+        </div>
       </form>
+
+      <!-- Populated on load from the copy-link flash; see the script block. -->
+      <div class="invite-link-box" id="invite-link-box">
+        <span class="invite-link-url" id="invite-link-url"></span>
+        <button type="button" class="btn btn-ghost btn-sm" id="invite-link-copy">Copy</button>
+      </div>
+
+      {#- One badge class and one label per InviteState. Kept as maps rather than an
+          if-chain so a seventh state added to the model shows up as a KeyError here
+          instead of silently rendering as a blank row. -#}
+      {% set state_badge = {
+           'accepted':    'badge-green',
+           'sent':        'badge-blue',
+           'issued':      'badge-dim',
+           'legacy':      'badge-amber',
+           'expired':     'badge-rust',
+           'send_failed': 'badge-red',
+         } %}
+      {% set state_label = {
+           'accepted':    'accepted',
+           'sent':        'sent',
+           'issued':      'not emailed',
+           'legacy':      'no invite',
+           'expired':     'expired',
+           'send_failed': 'send failed',
+         } %}
 
       <div class="email-list">
         {% if allowed_emails %}
           {% for entry in allowed_emails %}
+          {#- .value, not the member: InviteState is a str Enum whose repr would
+              render as "InviteState.SENT" in a template. -#}
+          {% set state = entry.state.value %}
           <div class="email-row">
             <div class="email-row-info">
-              <div class="email-row-addr">{{ entry.email }}</div>
+              <div class="email-row-addr">
+                {{ entry.email }}
+                <span class="badge {{ state_badge[state] }}">{{ state_label[state] }}</span>
+              </div>
               {% if entry.note %}
                 <div class="email-row-note">{{ entry.note }}</div>
               {% endif %}
+              {% if entry.prefill_username %}
+                <div class="email-row-note">Suggested username: {{ entry.prefill_username }}</div>
+              {% endif %}
+              <div class="email-row-lines">
+                {% if state == 'accepted' %}
+                  <span>Accepted {{ entry.accepted_at.strftime('%b %d, %Y') }}</span>
+                {% elif state == 'legacy' %}
+                  <span>Added {{ entry.added_at.strftime('%b %d, %Y') }} — predates invites</span>
+                {% else %}
+                  {% if entry.last_sent_at %}
+                    <span>Sent {{ entry.last_sent_at.strftime('%b %d, %Y %H:%M') }} UTC{% if entry.send_count and entry.send_count > 1 %} · {{ entry.send_count }} attempts{% endif %}</span>
+                  {% else %}
+                    <span>Never emailed — hand the link over with Copy link</span>
+                  {% endif %}
+                  {% if entry.expires_at %}
+                    <span>{{ 'Expired' if state == 'expired' else 'Expires' }} {{ entry.expires_at.strftime('%b %d, %Y %H:%M') }} UTC</span>
+                  {% endif %}
+                {% endif %}
+              </div>
+              {#- A string from a remote relay. Autoescaped like everything else,
+                  and truncated because a bounce message can run to paragraphs. -#}
+              {% if entry.last_send_error %}
+                <div class="email-row-error" title="{{ entry.last_send_error }}">
+                  Delivery failed: {{ entry.last_send_error | truncate(120, True) }}
+                </div>
+              {% endif %}
             </div>
-            <div class="email-row-meta">{{ entry.added_at.strftime('%b %d, %Y') }}</div>
-            <form method="POST" action="{{ url_for('admin_remove_email', entry_id=entry.id) }}"
-                  onsubmit="return confirm('Remove {{ entry.email }} from allowed list?')">
-              <button type="submit" class="btn btn-danger btn-sm">Remove</button>
-            </form>
+            <div class="email-row-actions">
+              {% if state != 'accepted' %}
+                {#- One route, two labels: a LEGACY row (and any invite that was
+                    never emailed) has nothing to *re*-send. -#}
+                <form method="POST" action="{{ url_for('admin_resend_invite', entry_id=entry.id) }}">
+                  <button type="submit" class="btn btn-ghost btn-sm">
+                    {{ 'Resend' if entry.last_sent_at else 'Send invite' }}
+                  </button>
+                </form>
+                <form method="POST" action="{{ url_for('admin_invite_link', entry_id=entry.id) }}"
+                      onsubmit="return confirm('Generate a new invite link for {{ entry.email }}? Any link already sent stops working immediately, and the new one is shown only once.')">
+                  <button type="submit" class="btn btn-ghost btn-sm">Copy link</button>
+                </form>
+              {% endif %}
+              <form method="POST" action="{{ url_for('admin_remove_email', entry_id=entry.id) }}"
+                    onsubmit="return confirm({% if state == 'accepted' %}'Remove the invite record for {{ entry.email }}? Their account, albums and photos are not touched — only this record goes.'{% else %}'Revoke the invitation for {{ entry.email }}? Any link already sent stops working immediately and they will no longer be able to register.'{% endif %})">
+                <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+              </form>
+            </div>
           </div>
           {% endfor %}
         {% else %}
           <div class="empty-state" style="padding:2rem 0;">
-            <p>No emails authorized yet. Add one above.</p>
+            <p>Nobody has been invited yet. Invite someone above.</p>
           </div>
         {% endif %}
       </div>
@@ -411,6 +542,55 @@
 
 {% block scripts %}
 <script>
+  // The copy-link flash carries the only rendering of an invite token there will
+  // ever be — the server stores just its SHA-256, so a lost link costs another
+  // rotation and breaks the one already sent. base.html removes every flash after
+  // five seconds, which is fine for "album deleted" and wrong for this, so the URL
+  // is lifted into a box on the page that stays put.
+  document.addEventListener('DOMContentLoaded', () => {
+    const box = document.getElementById('invite-link-box');
+    if (!box) return;
+    document.querySelectorAll('.flashes .flash').forEach(flash => {
+      const text = flash.textContent || '';
+      const match = text.match(/https?:\/\/\S+\/invite\/\S+/);
+      if (!match) return;
+      const url = match[0];
+      // textContent, never innerHTML: the URL came back from the server as text
+      // and must not be re-parsed as markup on the way into the DOM.
+      document.getElementById('invite-link-url').textContent = url;
+      box.style.display = 'flex';
+      document.getElementById('invite-link-copy').onclick = () => copyInviteLink(url);
+      flash.remove();
+    });
+  });
+
+  function copyInviteLink(url) {
+    const button = document.getElementById('invite-link-copy');
+    function onSuccess() {
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = 'Copy'; }, 2000);
+    }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(onSuccess).catch(() => fallbackCopy(url, onSuccess));
+    } else {
+      fallbackCopy(url, onSuccess);
+    }
+  }
+
+  // navigator.clipboard is unavailable on plain HTTP, which a self-hosted install
+  // behind no TLS terminator genuinely is; the textarea trick is the only path
+  // there. Same shape as dashboard.html's.
+  function fallbackCopy(text, onSuccess) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none;';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); onSuccess(); } catch (_) {}
+    document.body.removeChild(ta);
+  }
+
   function filterUsers() {
     const name = document.getElementById('user-filter-name').value.toLowerCase().trim();
     const email = document.getElementById('user-filter-email').value.toLowerCase().trim();

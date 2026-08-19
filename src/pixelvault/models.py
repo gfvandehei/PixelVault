@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
 
 from flask_login import UserMixin
@@ -37,12 +38,120 @@ class User(UserMixin, Base):
         """Return True if the given plaintext password matches the stored hash."""
         return check_password_hash(self.password_hash, password)
 
+class InviteState(str, Enum):
+    """The state of one invite, as shown in the admin panel.
+
+    A ``str`` enum so a template can compare against the plain value and a
+    member renders as itself without a ``.value`` everywhere.
+    """
+    ACCEPTED = 'accepted'      # account created; terminal
+    # Not a cosmetic state. Every allowed_email row that predates this feature has
+    # no token, and once registration is link-only those addresses are silently
+    # unusable — the person was told they could sign up and now cannot, with
+    # nothing in the UI to say why. LEGACY is what lets the admin panel list them
+    # as "No invite sent" beside a Send invite button, and it is deliberately
+    # resolved by an admin's click rather than by a migration that emails a
+    # year-old address on deploy day (design §11 Q9).
+    LEGACY = 'legacy'          # whitelist row from before invites existed; no token
+    EXPIRED = 'expired'        # token minted but the TTL ran out unclicked
+    SEND_FAILED = 'send_failed'  # token is live; the relay refused the message
+    ISSUED = 'issued'          # token minted, never emailed (copy-link path)
+    SENT = 'sent'              # emailed, awaiting the click
+
+
 class AllowedEmail(Base):
+    """An authorized email address and the invite issued against it.
+
+    One row is both halves of the fact: the whitelist entry that permits
+    registration, and the credential that carries it to a person. They are kept
+    together because in this app neither exists without the other — see
+    docs/invite_registration_design.md §4.
+
+    The token itself is never stored. ``token_hash`` holds the SHA-256 of it, so
+    a leaked backup or a screenshot of the admin page cannot be used to create an
+    account; the plaintext exists only in the sent email and, for the copy-link
+    fallback, in a single flash message. A resend therefore cannot re-show the
+    old link and mints a new one instead, which also revokes the old.
+
+    Lifecycle position is read from :attr:`state`, derived on every access rather
+    than stored — see that property for why.
+    """
     __tablename__ = 'allowed_email'
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     note: Mapped[str] = mapped_column(String(256), default='')
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # Indexed because acceptance looks a row up by this and nothing else; an
+    # unindexed scan would also leak, through timing, how far down the table a
+    # guessed token sits.
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=True, index=True)
+    token_issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    # Denormalised from token_issued_at + the TTL so the admin table can sort and
+    # display honest expiry without every render re-deriving it against a config
+    # value that may have changed since the token was minted.
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    prefill_username: Mapped[str] = mapped_column(String(64), default='')
+    last_sent_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    send_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Truncated to fit, and never carries the token: an SMTP failure string is
+    # rendered back to the admin and may reach a log. Empty means the last send
+    # succeeded.
+    last_send_error: Mapped[str] = mapped_column(String(256), default='')
+    accepted_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    accepted_user_id: Mapped[int] = mapped_column(Integer, ForeignKey('user.id'), nullable=True)
+    invited_by_id: Mapped[int] = mapped_column(Integer, ForeignKey('user.id'), nullable=True)
+
+    @property
+    def state(self) -> InviteState:
+        """Return where this invite stands, derived fresh on every read.
+
+        Deliberately not a stored column: the EXPIRED branch depends on the
+        wall clock, so a persisted value would be wrong from the moment a TTL
+        elapses with nobody looking, and would need a sweep job to stay honest.
+        Deriving it costs one comparison.
+
+        The branch order is the specification (design §4), not an accident —
+        each test precedes the next because it describes a *stronger* fact
+        about the row:
+
+        * ACCEPTED first because it is terminal. The row keeps its old
+          ``expires_at``, so a TTL that lapsed after the account was created
+          would otherwise re-report a live account's invite as EXPIRED.
+        * LEGACY next because a row with no token has nothing the remaining
+          branches can meaningfully test — no expiry, no send history. It is
+          also the only state an admin resolves by *issuing* rather than
+          resending.
+        * EXPIRED above SEND_FAILED because a dead token is the binding
+          problem: re-attempting delivery of a link that no longer works helps
+          nobody, and both faults are fixed by the same rotate-and-resend.
+        * SEND_FAILED above the two success states because the token is fine
+          and only delivery failed — it is a *pending* invite (see
+          :attr:`is_pending`) that happens to need another attempt, which is
+          exactly why it does not outrank EXPIRED.
+        * ISSUED before SENT distinguishes "minted but never emailed" — the
+          copy-link path, and an invite that is issued with mail disabled —
+          from one the relay has accepted.
+        """
+        if self.accepted_at is not None:
+            return InviteState.ACCEPTED
+        if self.token_hash is None:
+            return InviteState.LEGACY
+        if self.expires_at is not None and datetime.utcnow() >= self.expires_at:
+            return InviteState.EXPIRED
+        if self.last_send_error:
+            return InviteState.SEND_FAILED
+        if self.last_sent_at is None:
+            return InviteState.ISSUED
+        return InviteState.SENT
+
+    @property
+    def is_pending(self) -> bool:
+        """Return True while a usable token is outstanding and nobody has accepted it.
+
+        The three states that share one property: the link works today, so the
+        admin's action is to wait or resend, not to issue anew.
+        """
+        return self.state in (InviteState.ISSUED, InviteState.SENT, InviteState.SEND_FAILED)
 
 class Album(Base):
     __tablename__ = "album"

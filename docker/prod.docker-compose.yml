@@ -15,6 +15,25 @@ services:
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-500}
       - MAX_INFLIGHT_UPLOAD_MB_PER_USER=${MAX_INFLIGHT_UPLOAD_MB_PER_USER:-1500}
       - FLASK_DEBUG=false
+      # Mail & invites (docs/configuration.md §5, docs/registration_invites.md).
+      # Enumerated explicitly, like everything above: this list *is* the container's
+      # environment, so a variable missing here is silently absent in production no
+      # matter what .env.prod says. PUBLIC_BASE_URL is not optional once SMTP_HOST
+      # is set — create_app() refuses to boot without it, because it is the only
+      # source of the origin invite links point at.
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - MAIL_ENABLED=${MAIL_ENABLED:-true}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_SECURITY=${SMTP_SECURITY:-starttls}
+      - MAIL_FROM=${MAIL_FROM:-}
+      - MAIL_FROM_NAME=${MAIL_FROM_NAME:-PixelVault}
+      - MAIL_TIMEOUT_SECONDS=${MAIL_TIMEOUT_SECONDS:-10}
+      - ADMIN_CONTACT=${ADMIN_CONTACT:-}
+      - INVITE_TTL_HOURS=${INVITE_TTL_HOURS:-72}
+      - INVITE_RESEND_COOLDOWN_SECONDS=${INVITE_RESEND_COOLDOWN_SECONDS:-60}
     volumes:
       - ${UPLOAD_FOLDER:?UPLOAD_FOLDER not set}:/app/uploads
       - ${DATABASE_PATH:?DATABASE_PATH not set}:/app/instance
