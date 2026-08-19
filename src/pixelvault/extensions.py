@@ -114,8 +114,8 @@ def rate_limit_key():
     the routes that carry real cost this sidesteps the reverse-proxy question
     entirely (see TRUSTED_PROXY_COUNT in config.py and issue #30).
 
-    The IP fallback is still correct where it is used: /register and /login run
-    before the caller has any identity to key on.
+    The IP fallback is still correct where it is used: /login and the /invite
+    acceptance routes run before the caller has any identity to key on.
     """
     if current_user.is_authenticated:
         return f"user:{current_user.id}"

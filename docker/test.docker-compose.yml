@@ -21,6 +21,20 @@ services:
       - ADMIN_EMAIL=admin@test.com
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=password
+      # Invites, with no relay. SMTP_HOST is left unset on purpose, so build_mailer()
+      # picks ConsoleMailer and the whole invitation — link included — is printed to
+      # `docker compose logs`. That is how you walk the accept flow in this container:
+      # add an address in /admin, copy the link out of the log, open it.
+      # PUBLIC_BASE_URL still has to be set, since it is the only source of the link's
+      # origin, and it must match the port published below or the link will not open.
+      - PUBLIC_BASE_URL=http://localhost:5050
+      - ADMIN_CONTACT=admin@test.com
+      # Short enough to watch a link expire without waiting three days, long enough
+      # that a normal walkthrough does not trip over it.
+      - INVITE_TTL_HOURS=1
+      # The resend cooldown is a mail-bomb guard, and this container mails nobody —
+      # a 60s wait here only gets in the way of testing the button.
+      - INVITE_RESEND_COOLDOWN_SECONDS=5
     volumes:
       - ${PIXELVAULT_ROOT:?set the root}/src/pixelvault:/app/pixelvault
       - ${PIXELVAULT_ROOT:?set the root}/templates:/app/templates

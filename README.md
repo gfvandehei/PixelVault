@@ -4,7 +4,7 @@ A self-hosted photo and video sharing platform. Create albums, share links, and 
 
 ## Features
 
-- **Account system** — Invite-only registration with bcrypt-hashed passwords
+- **Account system** — Invite-only: an admin issues an invitation, the app emails a single-use link, and that link is the only way to register. bcrypt-hashed passwords
 - **Albums** — Create named albums with descriptions
 - **Upload links** — Share a link that lets others upload to your album
 - **View-only links** — Share a separate read-only link for browsing without upload access
@@ -51,7 +51,7 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 ### 4. Create the admin account
 
-Registration is invite-only — only emails the admin has authorized can sign up. You must create the admin account first.
+Registration is invite-only and there is no sign-up page, so the first account has to be created from the command line.
 
 **Option A — standalone script (recommended):**
 ```bash
@@ -74,7 +74,20 @@ This only needs to be done once. If an admin already exists the command will do 
 python app.py
 ```
 
-Visit http://localhost:5000, log in as admin, and go to **Admin** in the nav to authorize email addresses before sharing the registration link.
+Visit http://localhost:5000 and log in as admin.
+
+### 6. Invite someone
+
+Go to **Admin** in the nav and add an email address. That mints a single-use invitation link and
+emails it; the recipient clicks it, picks a username and password, and is in. Nobody can register
+any other way.
+
+With no `SMTP_HOST` set, the invitation is printed to the application log instead of sent — copy
+the link out of the log and hand it over. To send real mail, set `PUBLIC_BASE_URL`, `SMTP_HOST`
+and `MAIL_FROM`; see [docs/configuration.md §5](docs/configuration.md#5-mail--invites) for the
+full list (the Gmail app-password profile is there too) and
+[docs/registration_invites.md](docs/registration_invites.md) for the operator guide — resending,
+the copy-link fallback, and what to do when mail does not arrive.
 
 ---
 
@@ -161,9 +174,22 @@ files in `UPLOAD_CHUNK_SIZE` slices specifically to stay under that ceiling; set
 | `MAX_CONCURRENT_UPLOADS_PER_USER` | `10` | Open upload sessions one user may hold at once |
 | `MAX_INFLIGHT_UPLOAD_MB_PER_USER` | `2048` | Total size, in MB, of one user's in-progress uploads. Bounds disk held by abandoned partials |
 | `TRUSTED_PROXY_COUNT` | `1` | Number of reverse proxies in front of the app that append to `X-Forwarded-For`. **Setting it higher than the true count lets clients spoof their IP** — when unsure, set it lower |
+| `PUBLIC_BASE_URL` | — | External origin invite links are built from, e.g. `https://photos.example.com`. Required once SMTP is configured |
+| `MAIL_ENABLED` | `true` | Set `false` to stop sending entirely; invites are still issued and can be handed over with the admin copy-link button |
+| `SMTP_HOST` | — | Leave empty to print invitations to the log instead of sending them |
+| `SMTP_PORT` | `587` | 587 with `starttls`, 465 with `ssl` |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | — | Leave both empty for an unauthenticated relay |
+| `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none` |
+| `MAIL_FROM` | — | Sender address. Required once SMTP is configured |
+| `MAIL_FROM_NAME` | `PixelVault` | Sender display name |
+| `MAIL_TIMEOUT_SECONDS` | `10` | Socket timeout for the SMTP conversation |
+| `ADMIN_CONTACT` | `MAIL_FROM` | Address shown to accountless guests who follow a share link |
+| `INVITE_TTL_HOURS` | `72` | How long an invitation link stays valid |
+| `INVITE_RESEND_COOLDOWN_SECONDS` | `60` | Minimum gap between two sends of one invitation |
 
-See [docs/upload_operations.md](docs/upload_operations.md) for how to tune the upload variables and
-for a per-hop map of every limit an upload passes through.
+See [docs/configuration.md](docs/configuration.md) for every variable with its reasoning,
+and [docs/upload_operations.md](docs/upload_operations.md) for how to tune the upload variables
+and a per-hop map of every limit an upload passes through.
 
 ---
 
@@ -173,7 +199,11 @@ PixelVault is designed with internet exposure in mind:
 
 | Threat | Mitigation |
 |--------|-----------|
-| Unauthorized registration | Invite-only — admin must authorize each email before registration is allowed |
+| Unauthorized registration | No public sign-up. Accounts are created only by following a single-use, expiring invitation link an admin issued for that specific address |
+| Registering under someone else's address | The address is read from the invite record on the server, never from the submitted form |
+| Leaked database or backup | Invitation tokens are stored only as SHA-256 hashes — the plaintext link is never persisted |
+| Replayed or stale invitation links | Single-use (consumed in the same transaction as account creation) and expiring after `INVITE_TTL_HOURS` |
+| Using the invite mailer to spam a third party | Per-invite resend cooldown plus a 30/hour limit on the admin resend action |
 | Weak passwords | Minimum 8 chars, bcrypt with 600,000 rounds |
 | Brute force | Flask-Limiter: 20 login attempts/hour per IP |
 | File upload attacks | Extension whitelist + magic-byte MIME verification |
@@ -214,28 +244,32 @@ pixelvault/
 ├── src/pixelvault/           # Application package
 │   ├── __init__.py           # create_app() factory, DB migrations, error handlers, CLI
 │   ├── config.py             # Env-var config, allowed file types, validation constants
-│   ├── extensions.py         # db, login_manager, limiter instances
+│   ├── extensions.py         # db, login_manager, limiter, mailer instances
 │   ├── models.py             # User, AllowedEmail, Album, Photo (vanilla SQLAlchemy)
 │   ├── utils.py              # File handling, ZIP building, admin_required decorator
 │   ├── uploads.py            # Chunked upload sessions: quotas, chunk append, TTL sweep
+│   ├── mailer.py             # SMTP transport (and console/null/memory backends)
+│   ├── emails.py             # Renders the invitation message
+│   ├── invites.py            # Invite lifecycle: issue, rotate, validate, consume
 │   └── routes/
-│       ├── auth.py           # Register, login, logout
+│       ├── auth.py           # Login, logout, invitation acceptance
 │       ├── albums.py         # Dashboard, create/view/delete album, download
 │       ├── share.py          # Upload link, view-only link, file upload handler
 │       ├── media.py          # Authenticated media serving
 │       ├── api.py            # JSON photo list endpoints for gallery JS
-│       └── admin.py          # Admin panel — allowed emails and user list
+│       └── admin.py          # Admin panel — invites, users, albums
 ├── templates/
 │   ├── base.html             # Base layout + nav
 │   ├── login.html
-│   ├── register.html
+│   ├── register.html         # Invitation acceptance form
+│   ├── email/                # invite.txt / invite.html — the invitation message
 │   ├── dashboard.html        # Album list (owned + contributed)
 │   ├── create_album.html
 │   ├── album_view.html       # Owner's gallery view with share links
 │   ├── album_upload.html     # Share page (upload or view-only depending on link)
 │   ├── admin.html            # Admin panel
 │   └── error.html
-├── docs/                     # Upload protocol, client, and operations references
+├── docs/                     # Configuration, invites, database schema, upload references
 ├── uploads/                  # Created at runtime
 │   └── partials/             # In-progress chunked uploads (transient — exclude from backups)
 └── instance/                 # SQLite database (created at runtime)
