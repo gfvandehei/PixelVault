@@ -1,0 +1,38 @@
+{# Plain-text part of the invite email — the part that always renders.
+
+   This is the copy that has to work everywhere: a text-only client, a screen
+   reader, a spam quarantine digest, a phone showing a preview. The HTML
+   alternative beside it may be stripped or mangled; this one may not be, so the
+   full URL appears here on its own line, unwrapped and unadorned, and every fact
+   the invitee needs is stated in words rather than in layout.
+
+   Not autoescaped — Jinja escapes .html templates only — so keep every value
+   here inside plain prose. Nothing below is HTML, and nothing below may become
+   HTML without moving to the other file.
+-#}
+You have been invited to PixelVault
+===================================
+
+Hello,
+
+Someone has invited you to PixelVault, a private photo album site at
+{{ site_url }}. To accept, open this link and choose a username and a
+password:
+
+{{ invite_url }}
+
+The link stops working on {{ expires_at_text }}{% if expires_in_text %}, {{ expires_in_text }} from now{% endif %}.
+After that you will need to ask for a new one.
+
+It can be used once, and it creates an account for {{ email }} only -- that
+address is filled in for you and cannot be changed on the form.
+{%- if username %}
+
+The username {{ username }} has been suggested for you. You can keep it or pick
+another one.
+{%- endif %}
+
+If you were not expecting this invitation you can ignore this message. The link
+expires on its own, and no account is created until someone uses it.
+
+-- PixelVault

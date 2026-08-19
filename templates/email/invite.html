@@ -1,0 +1,116 @@
+{# HTML part of the invite email — the garnish, never the payload.
+
+   Written for mail clients, not browsers, which is why it looks nothing like the
+   rest of templates/:
+
+   * Tables for layout. Outlook renders through Word, which has no float, no
+     flex and no grid.
+   * Every style inline. Gmail strips <style> blocks in several of its clients,
+     so a rule that lives in a <head> is a rule that may not exist.
+   * No images, no web fonts, no external anything. Remote assets are blocked by
+     default in most clients and by every privacy-minded one, and Cormorant
+     Garamond — the product's serif — cannot be loaded here, so the wordmark
+     falls back to Georgia, which is already the next entry in the app's own
+     font stack.
+   * No JavaScript, which no client will run.
+
+   The design goal is that this degrades to the text part rather than away from
+   it: strip every attribute below and what remains is the same sentences in the
+   same order, with the invite URL visible in full as text. The button is a
+   convenience; the plain URL underneath it is the guarantee, because some
+   clients and gateways rewrite or break anchors.
+
+   Autoescaped (Jinja escapes .html), so the address and URL below are safe to
+   interpolate. Keep the palette in step with templates/base.html: #0d0d0f page,
+   #141417 card, #2a2a30 border, #e8e6e0 text, #888680 dim, #d4a853 amber. #}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0d0d0f" style="background-color:#0d0d0f;margin:0;padding:0;width:100%;">
+  <tr>
+    <td align="center" style="padding:32px 12px;">
+
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" bgcolor="#141417" style="background-color:#141417;border:1px solid #2a2a30;border-radius:6px;max-width:560px;width:100%;">
+        <tr>
+          <td style="padding:36px 36px 8px 36px;font-family:Georgia,'Times New Roman',serif;font-size:28px;line-height:1.2;color:#e8e6e0;">
+            PixelVault<span style="color:#d4a853;">.</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 36px 24px 36px;font-family:Georgia,'Times New Roman',serif;font-size:19px;line-height:1.4;color:#888680;border-bottom:1px solid #2a2a30;">
+            You have been invited
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:28px 36px 0 36px;font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#e8e6e0;">
+            <p style="margin:0 0 16px 0;">Hello,</p>
+            <p style="margin:0 0 16px 0;">
+              Someone has invited you to PixelVault, a private photo album site at
+              <a href="{{ site_url }}" style="color:#d4a853;text-decoration:none;">{{ site_url }}</a>.
+              To accept, open the link below and choose a username and a password.
+            </p>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="left" style="padding:12px 36px 20px 36px;">
+            {# Bulletproof button: colour on the <td>, padding on the <a>. A
+               background set on the anchor alone disappears in Outlook. #}
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td bgcolor="#d4a853" style="background-color:#d4a853;border-radius:6px;">
+                  <a href="{{ invite_url }}" style="display:inline-block;padding:14px 30px;font-family:Helvetica,Arial,sans-serif;font-size:15px;font-weight:bold;color:#0d0d0f;text-decoration:none;">Create your account</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:0 36px 4px 36px;font-family:Helvetica,Arial,sans-serif;font-size:13px;line-height:1.5;color:#888680;">
+            Or paste this address into your browser:
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:0 36px 24px 36px;font-family:'Courier New',Courier,monospace;font-size:13px;line-height:1.5;word-break:break-all;">
+            <a href="{{ invite_url }}" style="color:#d4a853;text-decoration:underline;word-break:break-all;">{{ invite_url }}</a>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:24px 36px;font-family:Helvetica,Arial,sans-serif;font-size:14px;line-height:1.6;color:#e8e6e0;border-top:1px solid #2a2a30;">
+            <p style="margin:0 0 12px 0;">
+              The link stops working on <strong style="color:#e8e6e0;">{{ expires_at_text }}</strong>{% if expires_in_text %}, {{ expires_in_text }} from now{% endif %}.
+              After that you will need to ask for a new one.
+            </p>
+            <p style="margin:0 0 12px 0;">
+              It can be used once, and it creates an account for
+              <strong style="color:#e8e6e0;">{{ email }}</strong> only &mdash; that address is
+              filled in for you and cannot be changed on the form.
+            </p>
+            {% if username %}
+            <p style="margin:0 0 12px 0;">
+              The username <strong style="color:#e8e6e0;">{{ username }}</strong> has been
+              suggested for you. You can keep it or pick another one.
+            </p>
+            {% endif %}
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:0 36px 32px 36px;font-family:Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:#888680;">
+            If you were not expecting this invitation you can ignore this message. The link
+            expires on its own, and no account is created until someone uses it.
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;width:100%;">
+        <tr>
+          <td align="center" style="padding:16px 12px 0 12px;font-family:Helvetica,Arial,sans-serif;font-size:12px;line-height:1.5;color:#555450;">
+            PixelVault &mdash; invite-only photo albums
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+</table>
