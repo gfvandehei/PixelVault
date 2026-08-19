@@ -13,6 +13,7 @@ services:
       - UPLOAD_FOLDER=/app/uploads
       - DATABASE_URL=sqlite:////app/instance/pixelvault.db
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-500}
+      - MAX_INFLIGHT_UPLOAD_MB_PER_USER=${MAX_INFLIGHT_UPLOAD_MB_PER_USER:-1500}
       - FLASK_DEBUG=false
     volumes:
       - ${UPLOAD_FOLDER:?UPLOAD_FOLDER not set}:/app/uploads
