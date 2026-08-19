@@ -1,6 +1,6 @@
 import sqlite3
 
-from flask import flash, jsonify, request
+from flask import current_app, flash, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, current_user
 from flask_login.utils import login_url
@@ -127,3 +127,33 @@ limiter = Limiter(
     default_limits=["200 per hour"],
     storage_uri="memory://",
 )
+
+
+class MailerProxy:
+    """App-bound handle on the mail transport, in the shape of db / login_manager / limiter.
+
+    The concrete backend is chosen once per app by :func:`~pixelvault.mailer.build_mailer`
+    and parked in ``app.extensions['mailer']``; this proxy resolves it per call
+    through ``current_app``. That indirection is what lets a test write
+    ``app.extensions['mailer'] = MemoryMailer()`` and have every caller pick it up
+    — including callers that imported ``mailer`` at module load, which is all of
+    them, and which is why swapping a module global would not work under the
+    session-scoped ``app`` fixture.
+    """
+
+    def init_app(self, app):
+        """Build the configured backend and register it on ``app``."""
+        from pixelvault.mailer import build_mailer
+        app.extensions['mailer'] = build_mailer()
+
+    @property
+    def backend(self):
+        """The current app's mail backend."""
+        return current_app.extensions['mailer']
+
+    def send(self, message):
+        """Deliver ``message`` through the current app's backend; raises ``MailError``."""
+        return self.backend.send(message)
+
+
+mailer = MailerProxy()

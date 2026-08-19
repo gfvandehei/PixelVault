@@ -7,6 +7,12 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import sys
 
 from .extensions import db, login_manager, limiter
+# Aliased deliberately. Importing the `pixelvault.mailer` *module* — which
+# extensions does, to build a backend — binds it as an attribute of this package,
+# and a package's attributes are this file's globals. An unaliased `mailer` proxy
+# here would therefore be silently replaced by the module object.
+from .extensions import mailer as mailer_ext
+from .mailer import SECURITY_MODES
 from .config import *
 import pixelvault.utils as utils
 import logging
@@ -55,9 +61,11 @@ def create_app():
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
 
     # ── Extensions ─────────────────────────────────────────────────────────
+    _validate_mail_config()
     db.init_app(app)
     login_manager.init_app(app)
     limiter.init_app(app)
+    mailer_ext.init_app(app)
     # ── Routes ─────────────────────────────────────────────────────────────
     # Import after extensions are bound so decorators resolve correctly
     from .routes import register_all
@@ -123,6 +131,47 @@ def create_app():
         _run_migrations()
 
     return app
+
+
+def _validate_mail_config():
+    """Refuse to boot on a mail configuration that would fail only at send time.
+
+    Every combination checked here produces an invite that is *issued* — the row
+    is committed before the send is attempted — and then either undeliverable or,
+    worse, deliverable but carrying a link to nowhere. Both faults surface hours
+    later, to an admin who has already told someone to expect an email, so they
+    are worth a loud crash on deploy instead.
+
+    Silence is deliberate for the unconfigured case: a dev checkout with no SMTP
+    at all must still boot, on ConsoleMailer. This only fires once an operator has
+    started configuring a relay and stopped halfway.
+    """
+    if not MAIL_ENABLED or not SMTP_HOST:
+        return  # nothing is being sent; there is nothing to be incoherent about
+
+    if SMTP_SECURITY not in SECURITY_MODES:
+        raise RuntimeError(
+            f"SMTP_SECURITY={SMTP_SECURITY!r} is not valid. "
+            f"Set it to one of: {', '.join(SECURITY_MODES)} "
+            "(587 normally wants 'starttls', 465 wants 'ssl')."
+        )
+
+    if not MAIL_FROM:
+        raise RuntimeError(
+            "SMTP_HOST is configured but MAIL_FROM is empty, so every message would be "
+            "rejected by the relay for having no sender. Set MAIL_FROM to the address "
+            "mail is sent from — with Gmail it must be the SMTP_USERNAME account itself, "
+            "because Google rewrites a From it does not own. "
+            "Set MAIL_ENABLED=false if you did not mean to send mail at all."
+        )
+
+    if not PUBLIC_BASE_URL:
+        raise RuntimeError(
+            "SMTP_HOST is configured but PUBLIC_BASE_URL is empty. Invite links are built "
+            "from that value rather than from the request's Host header, so without it "
+            "there is no origin to point an invite at. Set it to the canonical external "
+            "URL, e.g. PUBLIC_BASE_URL=https://photos.example.com."
+        )
 
 
 def _run_migrations():

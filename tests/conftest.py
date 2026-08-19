@@ -67,6 +67,16 @@ TEST_MAX_INFLIGHT_MB = 4
 #: Per-user open-session quota. Three, so the test needs four inits, not eleven.
 TEST_MAX_SESSIONS = 3
 TEST_TTL_HOURS = 24
+#: Invite link lifetime for the run. Tests that need an expired invite backdate
+#: the row rather than waiting, so the value only has to be stable, not short.
+TEST_INVITE_TTL_HOURS = 72
+TEST_INVITE_COOLDOWN_SECONDS = 60
+#: Origin every invite link in the suite is expected to be built from.
+TEST_PUBLIC_BASE_URL = "https://vault.test.invalid"
+TEST_MAIL_FROM = "pixelvault@test.invalid"
+#: Short enough that a test asserting the timeout reaches the socket can tell it
+#: apart from smtplib's own default of "no timeout".
+TEST_MAIL_TIMEOUT_SECONDS = 5
 
 _TEST_ENV = {
     "SECRET_KEY": "test-secret-key-not-used-in-production",
@@ -84,6 +94,18 @@ _TEST_ENV = {
     "ADMIN_USERNAME": "",
     "ADMIN_EMAIL": "",
     "ADMIN_PASSWORD": "",
+    # Mail: deliberately no SMTP_HOST, so build_mailer() picks ConsoleMailer and
+    # the suite has no way to open a socket even if a test forgets the `mailer`
+    # fixture. Selection tests override the module constants directly instead —
+    # see test_mailer.py.
+    "PUBLIC_BASE_URL": TEST_PUBLIC_BASE_URL,
+    "MAIL_ENABLED": "true",
+    "SMTP_HOST": "",
+    "MAIL_FROM": TEST_MAIL_FROM,
+    "MAIL_FROM_NAME": "PixelVault",
+    "MAIL_TIMEOUT_SECONDS": str(TEST_MAIL_TIMEOUT_SECONDS),
+    "INVITE_TTL_HOURS": str(TEST_INVITE_TTL_HOURS),
+    "INVITE_RESEND_COOLDOWN_SECONDS": str(TEST_INVITE_COOLDOWN_SECONDS),
 }
 os.environ.update(_TEST_ENV)
 
@@ -91,6 +113,7 @@ os.environ.update(_TEST_ENV)
 from pixelvault import create_app  # noqa: E402
 from pixelvault import uploads as uploads_module  # noqa: E402
 from pixelvault.extensions import db, limiter  # noqa: E402
+from pixelvault.mailer import MemoryMailer  # noqa: E402
 from pixelvault.models import Album, Base, Photo, UploadSession, User  # noqa: E402
 
 from .protocol import ProtocolClient  # noqa: E402
@@ -137,6 +160,25 @@ def reset_state(app):
         # deliberately holding; the cleanup tests set it back to 0 themselves.
         uploads_module._last_sweep_at = float("inf")
     yield
+
+
+@pytest.fixture
+def mailer(app):
+    """Swap a :class:`MemoryMailer` in for the duration of one test.
+
+    Replaces the backend in ``app.extensions`` rather than any module global,
+    because that is where ``extensions.mailer`` resolves on every call — so code
+    that imported the proxy at load time picks this up, and the swap survives the
+    session-scoped ``app`` fixture without leaking into the next test.
+
+    Yields the MemoryMailer itself; ``.outbox`` is the list of messages that would
+    have been sent.
+    """
+    previous = app.extensions.get("mailer")
+    memory = MemoryMailer()
+    app.extensions["mailer"] = memory
+    yield memory
+    app.extensions["mailer"] = previous
 
 
 @pytest.fixture
