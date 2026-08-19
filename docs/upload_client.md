@@ -247,6 +247,26 @@ if (res.aborted) return afterAbort();   // stallAbort -> error row; otherwise si
 if (stopped())   return bail();         // row removed or superseded — touch nothing
 ```
 
+### Releasing the server-side session
+
+Stopping the loop leaves the *server's* session open, holding the file's full declared size against
+the user's in-flight quota until the 24 h TTL sweep. `removeItem` therefore also calls
+`_cancelSession`, which evicts the resume-store mapping and fires
+`DELETE /upload/cancel/<upload_id>` (§6.5 of [upload_protocol.md](upload_protocol.md)). It runs
+*after* the abort, so the DELETE is not torn down along with the chunk socket; the server tolerates
+the two racing. Fire and forget — nothing in the UI waits on the reply, and the sweep is still the
+backstop.
+
+It uses a raw `XMLHttpRequest` rather than `_request`, which would repoint `item.xhr` on a row that
+is on its way out and hand it back to the watchdog.
+
+**Only `removeItem` calls it.** The other two paths that stop a loop must not:
+
+| Path | Why the session must survive |
+|---|---|
+| `giveUp` (terminal error) | The row keeps its Retry button, and the session is the only reason that retry resumes from the last good offset instead of restarting at zero |
+| `reset` (after a successful submit) | Rows that failed within the batch are left alive on purpose, so a later visit can pick them up |
+
 ---
 
 ## 7. Tunable constants

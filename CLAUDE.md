@@ -131,7 +131,7 @@ docker compose -f ./docker/prod.docker-compose.yml --env-file .env.prod up -d --
 | `UPLOAD_CHUNK_SIZE` | `8388608` (8 MiB) | no | Chunk size in bytes handed to the client at `init`. Must stay well under Cloudflare's 100 MB edge body cap |
 | `UPLOAD_SESSION_TTL_HOURS` | `24` | no | How long a partial upload stays resumable before the sweep reclaims its row and `.part` file |
 | `MAX_CONCURRENT_UPLOADS_PER_USER` | `10` | no | Open upload sessions one user may hold at once; enforced at `init` |
-| `MAX_INFLIGHT_UPLOAD_MB_PER_USER` | `2048` | no | Total declared bytes across a user's open sessions, in MB. Read into `MAX_INFLIGHT_UPLOAD_BYTES_PER_USER` |
+| `MAX_INFLIGHT_UPLOAD_MB_PER_USER` | `2048` | no | Total declared bytes across a user's open sessions, in MB. Read into `MAX_INFLIGHT_UPLOAD_BYTES_PER_USER`. **Must be ≥ `MAX_UPLOAD_MB`**, ideally 3× it (the client uploads 3 files in parallel and reserves each declared size in full) — otherwise no large file can ever be uploaded. `validate_upload_limits()` logs the contradiction at boot |
 | `TRUSTED_PROXY_COUNT` | `1` | no | Proxies appending to `X-Forwarded-For` ahead of Flask; consumed by `ProxyFix`. **Setting it too high lets clients spoof their rate-limit identity** — when unsure, set it too low |
 
 The last five are documented in depth in [docs/upload_operations.md](docs/upload_operations.md).
@@ -192,6 +192,7 @@ Both links respect the album-level `allow_upload` toggle.
 | Chunked `status` | 300/hour |
 | Chunked `chunk` | 600/hour, **charged only on non-200** |
 | Chunked `complete` | 600/hour |
+| Chunked `cancel` | 120/hour |
 
 The chunk endpoint's budget is sized for *failures*, not traffic: a legitimate 500 MB
 upload is ~63 chunks and spends nothing, while every refusal (409/422/413/400/404) is
@@ -250,6 +251,8 @@ spent on failures would start rejecting the good chunks too.
 | `test_upload_access.py` | Cross-user isolation, revoked `allow_upload`, anonymous callers |
 | `test_upload_recovery.py` | TTL sweep, orphaned partials, quota reclamation |
 | `test_upload_security.py` | Decompression-bomb ceiling and the MIME-not-extension path choice |
+| `test_upload_cancel.py` | Cancel releasing quota immediately, idempotence, cross-user isolation |
+| `test_upload_config.py` | `validate_upload_limits()` — caps that contradict each other |
 
 `conftest.py` sets the environment before importing the app, because `config.py` reads
 env vars at module import time.

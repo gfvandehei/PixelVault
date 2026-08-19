@@ -33,6 +33,8 @@ from .config import (
     MAX_INFLIGHT_UPLOAD_BYTES_PER_USER,
 )
 
+MB = 1024 * 1024  # only for rendering byte counts into user-facing messages
+
 
 class UploadError(Exception):
     """Base for upload faults, carrying the HTTP status the protocol assigns them."""
@@ -198,13 +200,25 @@ def check_user_quota(db_session, user_id, total_size,
     if open_count >= max_sessions:
         raise QuotaExceeded(
             f"Too many uploads in progress ({open_count}/{max_sessions}). "
-            "Finish or cancel one before starting another."
+            "Finish one, or remove it from the list, before starting another.",
+            open_sessions=open_count, max_sessions=max_sessions,
         )
 
-    projected = inflight_bytes_for_user(db_session, user_id) + int(total_size)
-    if projected > max_bytes:
+    used = inflight_bytes_for_user(db_session, user_id)
+    if used + int(total_size) > max_bytes:
+        # Spell out the arithmetic. The bare "would exceed your limit" this replaces
+        # was true and useless: the quota counts *declared* sizes across every open
+        # session in every album, so the number the user is over is one they cannot
+        # see anywhere in the UI, and the two remedies — finish something, or get the
+        # cap raised — are not guessable from the sentence. `free` is clamped because
+        # lowering the cap on a deploy can leave sessions admitted under the old one.
+        free = max(0, max_bytes - used)
         raise QuotaExceeded(
-            f"Upload would exceed your in-flight limit of {max_bytes // (1024 * 1024)} MB."
+            f"Upload would exceed your in-flight limit of {max_bytes // MB} MB. "
+            f"This file needs {int(total_size) // MB} MB but only {free // MB} MB is free — "
+            f"{used // MB} MB is reserved by {open_count} upload(s) already in progress. "
+            "Finish or remove one to free it up, or ask an admin to raise the limit.",
+            inflight_bytes=used, limit_bytes=max_bytes, required_bytes=int(total_size),
         )
     return max_sessions, max_bytes
 

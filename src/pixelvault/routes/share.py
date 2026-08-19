@@ -45,6 +45,14 @@ def _upload_error(err):
     return jsonify(body), err.status_code
 
 
+def _album_for_token(token):
+    """Return the album behind a share token, or 404. No permission check."""
+    album = db.session.query(Album).filter_by(token=token).one_or_none()
+    if album is None:
+        abort(404)
+    return album
+
+
 def _album_for_upload(token):
     """Return the album behind an upload share token, aborting if it cannot accept uploads.
 
@@ -52,10 +60,10 @@ def _album_for_upload(token):
     ~59 requests spread over minutes, and the owner can switch ``allow_upload`` off at
     any point in that window; the permission that let the first chunk through says
     nothing about the last one, or about ``complete``.
+
+    ``cancel`` deliberately does not use this — see the endpoint.
     """
-    album = db.session.query(Album).filter_by(token=token).one_or_none()
-    if album is None:
-        abort(404)
+    album = _album_for_token(token)
     if not album.allow_upload:
         abort(make_response(jsonify({'error': 'Uploads are disabled for this album.'}), 403))
     return album
@@ -260,6 +268,41 @@ def register(app):
             'expires_at': upload_session.expires_at(UPLOAD_SESSION_TTL_HOURS)
                                         .strftime('%Y-%m-%dT%H:%M:%SZ'),
         })
+
+    @app.route('/share/<token>/upload/cancel/<upload_id>', methods=['DELETE'])
+    @login_required
+    @limiter.limit("120 per hour")
+    def upload_cancel(token, upload_id):
+        """
+        Abandon a chunked upload, returning its reservation to the caller's quota now.
+
+        Without this, a file the user removes from the queue keeps its full declared
+        size charged against ``MAX_INFLIGHT_UPLOAD_MB_PER_USER`` until the TTL sweep
+        collects it a day later — which is the ordinary way a user meets "upload would
+        exceed your in-flight limit" while nothing is actually uploading.
+
+        Deliberately not gated on ``allow_upload``: closing an album must not strand
+        its guests' reservations, and handing quota back is the one upload operation
+        that stays safe once uploads are off.
+
+        Idempotent, and answers 200 whether or not there was anything to cancel. The
+        client fires this without waiting for a reply, so a retry, a double click, or a
+        handle the sweep already took must all read as "it is gone". A handle belonging
+        to someone else is likewise reported as nothing-to-cancel: ``get_session`` is
+        scoped to the caller and album, and a stranger learns nothing about whether the
+        handle is real.
+
+        A chunk racing the delete is safe — ``append_chunk`` holds a lock on the partial
+        and re-reads the row under it, so it sees the deletion and reports 404.
+        """
+        album = _album_for_token(token)
+        upload_dir = current_app.config['UPLOAD_FOLDER']
+        upload_session = get_session(db.session, upload_id,
+                                     user_id=current_user.id, album_id=album.id)
+        if upload_session is None:
+            return jsonify({'cancelled': False}), 200
+        discard_session(db.session, upload_session, upload_dir)
+        return jsonify({'cancelled': True}), 200
 
     # Charge the limiter for every chunk request that is not a 200, and for nothing
     # else. Two defects sat in the previous '422 only' rule, in opposite directions.

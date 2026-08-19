@@ -309,6 +309,29 @@ def test_a_user_may_not_declare_more_bytes_in_flight_than_the_quota_allows(proto
     assert f"{TEST_MAX_INFLIGHT_MB} MB" in second.get_json()["error"]
 
 
+def test_the_byte_quota_429_carries_the_numbers_as_fields(protocol):
+    """The prose message is for the user; these are for anything that has to *act* on
+    the refusal. They ride in ``UploadError.extra``, the same channel a 409 uses to
+    hand back the true offset, so a client need not parse a sentence to learn how far
+    over the cap it is."""
+    protocol.init("big-a.jpg", 3 * MB)
+
+    body = protocol.init("big-b.jpg", 3 * MB).get_json()
+
+    assert body["limit_bytes"] == TEST_MAX_INFLIGHT_MB * MB
+    assert body["required_bytes"] == 3 * MB
+    assert body["inflight_bytes"] == 3 * MB
+
+
+def test_the_session_quota_429_carries_the_counts_as_fields(protocol):
+    _open_sessions(protocol, TEST_MAX_SESSIONS)
+
+    body = protocol.init("one-too-many.jpg", 4096).get_json()
+
+    assert body["open_sessions"] == TEST_MAX_SESSIONS
+    assert body["max_sessions"] == TEST_MAX_SESSIONS
+
+
 def test_the_byte_quota_and_the_session_quota_are_told_apart_by_their_message(protocol):
     """Two different 429s with two different remedies; the client shows the text."""
     _open_sessions(protocol, TEST_MAX_SESSIONS)

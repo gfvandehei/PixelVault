@@ -419,6 +419,9 @@
     if (item.status === 'uploading' || item.status === 'processing') {
       if (item.xhr) item.xhr.abort();
     }
+    /* After the abort, so the DELETE is not torn down along with the chunk
+       socket. The server tolerates the two racing. */
+    this._cancelSession(item);
     var i = this.items.indexOf(item);
     if (i !== -1) this.items.splice(i, 1);
     if (item.nodes.root.parentNode) {
@@ -427,6 +430,32 @@
     this._syncSubmit();
     this._renderTotal();
     this.onSelectionChange(this.items.length);
+  };
+
+  /* Hand the server back the quota an abandoned session is holding, instead of
+     leaving its full declared size reserved until the 24 h TTL sweep collects it.
+     Fire and forget: nothing in the UI depends on the answer, and the sweep is
+     still the backstop if the request never lands.
+
+     Deliberately reached only from removeItem — an explicit "I don't want this
+     file". NOT from a terminal error, whose row keeps its Retry button and whose
+     session is the only reason that retry resumes rather than restarting from
+     zero; and NOT from reset(), which leaves sessions alive on purpose so the
+     next visit can pick them up.
+
+     Raw XHR rather than _request, which repoints item.xhr — the row this belongs
+     to is on its way out and must not become the watchdog's business again. */
+  Uploader.prototype._cancelSession = function (item) {
+    var uploadId = item.uploadId || this.resumeStore.get(item.clientKey);
+    if (!uploadId) return;
+    this.resumeStore.evict(item.clientKey);
+    item.uploadId = null;
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('DELETE', this.chunkBase + '/cancel/' + encodeURIComponent(uploadId), true);
+      xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      xhr.send();
+    } catch (e) { /* the sweep collects it */ }
   };
 
   Uploader.prototype.retryItem = function (item) {

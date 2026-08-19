@@ -206,7 +206,7 @@ New environment variables introduced by chunked uploads, all defined in `src/pix
 | `UPLOAD_CHUNK_SIZE` | `8388608` (8 MiB) | Chunk size in bytes handed to the client at `init`. Must stay well under the smallest body cap on the path |
 | `UPLOAD_SESSION_TTL_HOURS` | `24` | How long a partial upload remains resumable before the sweep reclaims its row and `.part` file |
 | `MAX_CONCURRENT_UPLOADS_PER_USER` | `10` | Open upload sessions one user may hold at once. Rejected at `init` |
-| `MAX_INFLIGHT_UPLOAD_MB_PER_USER` | `2048` | Total declared bytes across a user's open sessions, in MB. Read into `MAX_INFLIGHT_UPLOAD_BYTES_PER_USER` |
+| `MAX_INFLIGHT_UPLOAD_MB_PER_USER` | `2048` | Total declared bytes across a user's open sessions, in MB. Read into `MAX_INFLIGHT_UPLOAD_BYTES_PER_USER`. **Must be at least `MAX_UPLOAD_MB`** — see below |
 | `TRUSTED_PROXY_COUNT` | `1` | Proxies that append to `X-Forwarded-For` before the request reaches Flask; consumed by `ProxyFix`. See [#30](https://github.com/gfvandehei/PixelVault/issues/30) |
 
 Note the asymmetry in the fourth row: the **environment variable is in megabytes**
@@ -216,6 +216,39 @@ Note the asymmetry in the fourth row: the **environment variable is in megabytes
 
 The partials directory name is `partials`, fixed in `UPLOAD_PARTIALS_SUBDIR` and deliberately not
 environment-configurable — nothing should be able to point it at the served media root.
+
+### The caps have to agree with each other
+
+`MAX_INFLIGHT_UPLOAD_MB_PER_USER` must be **at least `MAX_UPLOAD_MB`**, and ideally
+**three times it**:
+
+```
+MAX_INFLIGHT_UPLOAD_MB_PER_USER  >=  3 x MAX_UPLOAD_MB
+```
+
+Below `1x` the feature is simply broken for large files: `init` accepts the declared
+`total_size` against `MAX_CONTENT_LENGTH`, then the per-user quota refuses the same
+number, so **no file above the in-flight cap can ever be uploaded** — and the user sees a
+quota message with nothing in flight. Raising `MAX_UPLOAD_MB` without raising this is the
+single easiest misconfiguration to make, because `MAX_UPLOAD_MB` is the knob whose name
+suggests it governs how large a file may be.
+
+Below `3x` only batches suffer: the browser uploads three files in parallel
+(`CONCURRENCY` in `static/js/uploader.js`) and each open session reserves its **full
+declared size** from the first byte, so part of a batch of large files is refused at
+`init` until its siblings finish.
+
+`validate_upload_limits()` in `config.py` checks this at boot and logs it — at `ERROR`
+for the first case, `WARNING` for the second. It never aborts startup: a contradictory
+pairing degrades the upload feature, and turning that into a crash-looping container on
+an existing deployment would be worse. Grep the boot logs for `Upload limit`:
+
+```bash
+docker compose -f ./docker/prod.docker-compose.yml logs app | grep 'Upload limit'
+```
+
+It also flags `UPLOAD_CHUNK_SIZE > MAX_UPLOAD_MB` (every chunk would 413) and
+`MAX_CONCURRENT_UPLOADS_PER_USER < 1` (no session can be opened at all).
 
 ### `TRUSTED_PROXY_COUNT` is a security setting, not a tuning knob
 
@@ -253,6 +286,7 @@ flowchart TD
 | **413 immediately**, before any progress | **VPS nginx** if the body is an nginx error page; **Flask** if it is `templates/error.html` | View the response body. For nginx: `nginx -T \| grep client_max_body_size` and `grep "client intended to send too large body" /var/log/nginx/error.log`. For Flask: compare the file size against `MAX_UPLOAD_MB` |
 | **504 mid-upload**, browser hangs at a fixed percentage | **VPS nginx** | `grep "upstream timed out" /var/log/nginx/error.log`. Check `proxy_read_timeout` and `proxy_send_timeout` — nginx defaults to 60 s, which one slow chunk can exceed |
 | Upload reaches **100% then hangs in "Processing"** | **Flask `complete`**, or nginx request buffering | Watch `docker compose logs -f app` for the `complete` request. If it is running, the wait is real synchronous HEIC/thumbnail work — raise `--timeout` or accept the wait. If no request has arrived, nginx is still replaying a buffered body: check `proxy_request_buffering`. A `WORKER TIMEOUT` line means gunicorn killed the worker mid-processing |
+| **429 at the start of an upload**, message naming an "in-flight limit" | **Flask, per-user quota** — not the rate limiter | The message states the arithmetic: the cap, what the file needs, what is free, and how many sessions hold the rest. Usual cause is stale reservations — every open session holds its full declared size for `UPLOAD_SESSION_TTL_HOURS` even if not a byte has moved. Removing a file from the uploader queue now cancels its session and releases the reservation at once; `flask cleanup-uploads` clears what expired. If the message says nothing is free while nothing is uploading, check the caps agree (§4) |
 | **429 while browsing thumbnails** | **Flask-Limiter** | Every non-decorated route inherits the default `200 per hour` (`src/pixelvault/extensions.py`), and one album view spends one request per photo against `/media`. If `TRUSTED_PROXY_COUNT` is wrong, `get_remote_address` returns the proxy address instead of the client's and **all visitors share one bucket** — check it against the real hop count first ([#30](https://github.com/gfvandehei/PixelVault/issues/30)). `/media` responses are `private, max-age=31536000, immutable`, so repeat views are cached and free; the exposure is first views and new visitors. Confirm by watching whether a second concurrent visitor triggers it |
 
 Two further notes on the 429 row. Limits are stored in `memory://` and the store is per **process**,
