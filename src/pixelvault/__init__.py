@@ -204,6 +204,25 @@ def _run_migrations():
                 updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id, album_id, client_key)
             )""",
+            # Invite lifecycle on allowed_email (docs/invite_registration_design.md §4).
+            # Every default here is a literal, because SQLite refuses a non-constant
+            # DEFAULT on ADD COLUMN and would otherwise leave the pre-existing rows
+            # unwritable; the nullable columns carry no default at all, which is what
+            # makes an untouched row read as LEGACY rather than as a broken invite.
+            "ALTER TABLE allowed_email ADD COLUMN token_hash VARCHAR(64)",
+            "ALTER TABLE allowed_email ADD COLUMN token_issued_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN expires_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN prefill_username VARCHAR(64) NOT NULL DEFAULT ''",
+            "ALTER TABLE allowed_email ADD COLUMN last_sent_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN send_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE allowed_email ADD COLUMN last_send_error VARCHAR(256) NOT NULL DEFAULT ''",
+            "ALTER TABLE allowed_email ADD COLUMN accepted_at DATETIME",
+            "ALTER TABLE allowed_email ADD COLUMN accepted_user_id INTEGER REFERENCES user(id)",
+            "ALTER TABLE allowed_email ADD COLUMN invited_by_id INTEGER REFERENCES user(id)",
+            # Named exactly as SQLAlchemy names the index=True on the column, so a
+            # database created by create_all() and one arrived at by migration end up
+            # with the same schema rather than two indexes doing one job.
+            "CREATE INDEX IF NOT EXISTS ix_allowed_email_token_hash ON allowed_email (token_hash)",
         ]:
             try:
                 conn.execute(db.text(stmt))
