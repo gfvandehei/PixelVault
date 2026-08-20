@@ -49,12 +49,14 @@ pixelvault/
 │       ├── share.py                # /share/<token> and /view/<view_token> (public links)
 │       ├── media.py                # /media/<filename> (authenticated file serving)
 │       ├── api.py                  # /api/* (JSON photo lists for gallery JS)
-│       └── admin.py                # /admin (invites, user list, album list)
-├── templates/                      # Jinja2 HTML (base.html + 8 pages)
-│   └── email/                      # invite.txt / invite.html — the invitation's two parts
+│       ├── admin.py                # /admin (invites, user list, album list)
+│       └── account.py              # /account (identity, self-service password change)
+├── templates/                      # Jinja2 HTML (base.html + 9 pages)
+│   └── email/                      # invite.* and password_changed.* — each message's two parts
 ├── docs/
 │   ├── configuration.md            # Every environment variable, why it exists, how to set it
 │   ├── database_schema.md          # Table/column reference
+│   ├── account_page_design.md      # Account page & session revocation design (#31)
 │   ├── registration_invites.md     # Operator guide: inviting, resending, troubleshooting mail
 │   ├── invite_registration_design.md  # Architectural design for the invite system (#7)
 │   ├── upload_protocol.md          # Chunked upload wire contract (client <-> server)
@@ -234,6 +236,33 @@ Operator guide (setup, the panel's buttons, mail troubleshooting):
 [docs/registration_invites.md](docs/registration_invites.md). Design and rationale:
 [docs/invite_registration_design.md](docs/invite_registration_design.md).
 
+### Account Page & Session Revocation
+`/account` shows a signed-in user their username, email and join date — all read-only — and is
+the only place a password is changed. Routes live in
+[src/pixelvault/routes/account.py](src/pixelvault/routes/account.py).
+
+The load-bearing part is not the form, it is what a change *does* to sessions. Flask-Login
+stores `User.get_id()` in both the session cookie and the remember-me cookie, so that value is
+the whole of what a browser presents. It now returns `"<id>:<session_token>"`, and
+`extensions.load_user` verifies the token half against the row on every request. Consequences:
+
+- **`rotate_session_token()` revokes every cookie for that user** in one UPDATE — no session
+  store, no sweep. A password change calls it, which is how "signs you out everywhere else" is
+  implemented.
+- **The route must re-issue its own session afterwards.** Rotation is indiscriminate and kills
+  the caller's cookie too; `login_user(user, remember=...)` immediately after the commit is what
+  stops a user being signed out by their own password change.
+- **A cookie carrying a bare id is refused, not grandfathered** — sessions predating the feature
+  ended on the deploy that added it, so that a stolen pre-deploy cookie cannot outlive the
+  password change made to revoke it. `tests/conftest.login()` therefore writes the composite id.
+- **The notice email is sent after the commit and cannot undo it**, the same order invites use.
+  `emails.send_password_changed` returns quietly with no `MAIL_FROM` rather than raising, because
+  a missing courtesy email must not 500 a completed password change.
+
+Recovering a *forgotten* password is deliberately absent —
+[#33](https://github.com/gfvandehei/PixelVault/issues/33). Design and rationale:
+[docs/account_page_design.md](docs/account_page_design.md).
+
 ### Share Link System
 Each `Album` has two tokens:
 - `token` → `/share/<token>` — upload link (guests can browse & upload)
@@ -250,6 +279,7 @@ Both links respect the album-level `allow_upload` toggle.
 | Invite submit (`POST /invite`) | 20/hour (per IP) |
 | Upload (legacy single-request) | 600/hour |
 | Album create | 30/hour |
+| Password change (`POST /account/password`) | 10/hour (per user) |
 | Admin email add (issues + sends an invite) | 60/hour |
 | Admin invite resend | 30/hour |
 | Admin invite copy-link | 30/hour |
@@ -282,7 +312,15 @@ spent on failures would start rejecting the good chunks too.
   third-party address. Copy-link is exempt because it sends nothing.
 - Invite links are built from `PUBLIC_BASE_URL`, never from the request's `Host`.
 - Accepting an invite while already signed in is refused, not silently merged.
-- Sessions use `HttpOnly=True`, `SameSite=Lax`, and `Secure=True` when `HTTPS=true`.
+- Changing a password **rotates `user.session_token`**, which invalidates every session and
+  remember-me cookie that account holds — on every device — because both carry that token. The
+  browser making the change is re-issued a session immediately; every other one is gone. A
+  *failed* attempt rotates nothing, so the form cannot be used as a logout button by whoever
+  can reach it.
+- The change-password form requires the current password. That, plus `SameSite=Lax` on both the
+  session and remember-me cookies, is what stands in for the CSRF tokens the app does not have.
+- Sessions use `HttpOnly=True`, `SameSite=Lax`, and `Secure=True` when `HTTPS=true`. The
+  Flask-Login remember cookie is configured to match — it defaults to *no* `SameSite` at all.
 - Security headers set on every response: `X-Frame-Options`, `X-Content-Type-Options`, HSTS.
 - bcrypt uses 600,000 rounds — password operations are intentionally slow.
 - `ProxyFix` is wrapped around the WSGI app with `x_for=TRUSTED_PROXY_COUNT`. **Never set that
@@ -298,7 +336,7 @@ spent on failures would start rejecting the good chunks too.
 
 | Model | Key Fields |
 |---|---|
-| `User` | `username`, `email`, `password_hash`, `is_admin` |
+| `User` | `username`, `email`, `password_hash`, `is_admin`, `session_token` (UUID; rides in every cookie via `get_id()`, rotated to revoke every session) |
 | `AllowedEmail` | `email`, `token_hash` (SHA-256; the plaintext is never stored), `token_issued_at`, `expires_at`, `last_sent_at`, `send_count`, `last_send_error`, `accepted_at`, `accepted_user_id`, `note`, `prefill_username`, `invited_by_id` — one row is both the whitelist entry and the invite credential. `state` and `is_pending` are **derived properties**, never columns |
 | `Album` | `name`, `token`, `view_token`, `allow_upload`, `owner_id` |
 | `Photo` | `stored_filename` (UUID), `original_filename`, `mime_type`, `album_id`, `uploader_id`, `is_thumbnail` |
@@ -335,6 +373,7 @@ spent on failures would start rejecting the good chunks too.
 | `test_invite_lifecycle.py` | Issue → send → accept, single use, rotation killing the old link, TTL expiry, resend cooldown |
 | `test_invite_email.py` | The composed invitation: both parts, the link's origin, refusal to compose without `PUBLIC_BASE_URL` |
 | `test_invite_admin.py` | The panel's four actions, the issue-commit-then-send order, and what each failure flashes |
+| `test_account.py` | Password change end to end: other sessions evicted, the caller's kept, a failed attempt evicting nobody, the four validation rules, the notice email, and a relay failure not undoing the change |
 | `test_invite_access.py` | **The email cannot be overridden via the form**; bad/expired/replayed tokens; accepting while signed in; `/register` is gone; rate limits |
 
 `conftest.py` sets the environment before importing the app, because `config.py` reads
