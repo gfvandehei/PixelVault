@@ -11,7 +11,8 @@ from ..uploads import (UploadError, OffsetMismatch, SessionUnusable, append_chun
                        is_valid_client_key, maybe_sweep_expired_sessions,
                        open_or_recover_session)
 from ..utils import (ImageTooLargeError, validate_file, validate_file_header, validate_stored_file,
-                     save_file, store_upload, build_album_zip)
+                     save_file, store_upload, send_album_zip,
+                     ALBUM_ZIP_RATE_LIMIT)
 
 # Headroom over one chunk for the per-route body cap. A chunk is exactly
 # UPLOAD_CHUNK_SIZE, but a client is entitled to send a short final one and the
@@ -453,24 +454,26 @@ def register(app):
         discard_session(db.session, upload_session, upload_dir)
         return jsonify({'results': [{'filename': filename, 'success': True}]})
 
+    # Sized and justified next to the cost it bounds; see ALBUM_ZIP_RATE_LIMIT
+    # in utils.py. Keyed per user id, not per IP.
     @app.route('/share/<token>/download')
     @login_required
+    @limiter.limit(ALBUM_ZIP_RATE_LIMIT)
     def download_album_share(token):
         """Stream a ZIP of all album photos to a user accessing the album via its upload share link."""
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
             abort(404)
-        buf = build_album_zip(album)
-        zip_name = secure_filename(album.name or 'album') + '.zip'
-        return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+        return send_album_zip(album)
 
+    # Sized and justified next to the cost it bounds; see ALBUM_ZIP_RATE_LIMIT
+    # in utils.py. Keyed per user id, not per IP.
     @app.route('/view/<view_token>/download')
     @login_required
+    @limiter.limit(ALBUM_ZIP_RATE_LIMIT)
     def download_album_view(view_token):
         """Stream a ZIP of all album photos to a user accessing the album via its view-only share link."""
         album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
         if album is None:
             abort(404)
-        buf = build_album_zip(album)
-        zip_name = secure_filename(album.name or 'album') + '.zip'
-        return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+        return send_album_zip(album)
