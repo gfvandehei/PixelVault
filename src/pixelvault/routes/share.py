@@ -1,3 +1,37 @@
+"""Share-link routes, and the capability model every share surface is judged by.
+
+A share token *names* an album; on its own it authorises nothing. The one thing a
+token does is **mint a grant**: a logged-in visitor who opens ``/share/<token>`` or
+``/view/<view_token>`` gets an ``AlbumAccess`` row recording which link they arrived
+through. Every later decision — read a photo, list the album, download the ZIP,
+upload into it — is taken against that row, never against the token in the URL and
+never against a value carried in the session cookie.
+
+Three rules, in decreasing order of how badly breaking them hurts:
+
+* **No capability ever goes into the session.** Flask signs the session cookie but
+  does not encrypt it, so anything parked there is readable by the person holding
+  it. Writing ``album.token`` into a *view-only* visitor's session therefore handed
+  them the upload capability in a form they could decode and replay (#35). The
+  grant lives in the database; the cookie carries identity, and the breadcrumb of
+  which link was followed, and nothing else.
+* **A token mints a grant, it does not stand in for one.** Media, photo listings
+  and ZIPs are served on the grant, so a leaked media URL is worth one file to an
+  account holder and nothing at all to an anonymous caller (#40). Reading one file
+  must never be the thing that grants the album.
+* **Writes are authorised by ``access_type``, on every request.** An owner who
+  downgrades a guest to view-only has to have that reach the endpoints, not just
+  hide the upload widget (#38) — and it is re-checked per request for the same
+  reason ``allow_upload`` is: one 470 MB upload is ~59 requests spread over
+  minutes, and the permission that admitted the first chunk says nothing about the
+  last one.
+
+The three helpers below (``album_access_for``, ``may_read_album``,
+``may_upload_to``) are the whole of the model, and ``routes/albums.py``,
+``routes/media.py`` and ``routes/api.py`` import them rather than re-deriving it —
+four copies of an access rule is four chances for one of them to drift.
+"""
+
 from flask import (render_template, request, url_for, abort, jsonify, send_file,
                    redirect, session, current_app, make_response)
 from flask_login import login_required, current_user
@@ -45,6 +79,66 @@ def _upload_error(err):
     return jsonify(body), err.status_code
 
 
+def album_access_for(album):
+    """Return the caller's ``AlbumAccess`` row for this album, or None.
+
+    The row is the grant. It is minted when a logged-in visitor first opens the
+    album through one of its share links, and for a non-owner it is the only thing
+    that speaks for them afterwards. An anonymous caller never has one, which is
+    the whole of their authorisation story.
+    """
+    if not current_user.is_authenticated:
+        return None
+    return db.session.query(AlbumAccess).filter_by(
+        user_id=current_user.id, album_id=album.id).first()
+
+
+def may_read_album(album, photo=None):
+    """Return True if the caller may see this album's contents.
+
+    Owner, contributor, or grant holder — and nobody else, in particular nobody
+    who merely turned up holding a URL. ``photo`` widens the answer to whoever
+    uploaded that one file: their own upload should not become unreadable to them
+    if the grant is later removed, and the dashboard already lists albums on
+    exactly these two facts (ownership and contribution), so this is the read rule
+    the rest of the app implies.
+
+    Note what is absent: the share token. Presenting it is how a grant is minted
+    (see ``album_view``), not a substitute for holding one — otherwise a media URL,
+    which travels in history, in ``Referer``, in screenshots and in every photo
+    listing already handed out, would be a key to the whole album.
+    """
+    if not current_user.is_authenticated:
+        return False
+    if album.owner_id == current_user.id:
+        return True
+    if photo is not None and photo.uploader_id == current_user.id:
+        return True
+    return album_access_for(album) is not None
+
+
+def may_upload_to(album):
+    """Return True if the caller may add photos to this album.
+
+    Deliberately a second question rather than a flag on the first: a guest
+    downgraded to view-only keeps every read they had and loses every write, so
+    the two answers genuinely differ for the same person and album. Owners are
+    unconditional; everyone else needs a grant that still says ``upload``.
+
+    A missing grant is a refusal, not a default. The first-visit branch in
+    ``album_view`` mints ``upload`` for anyone arriving through the upload link, so
+    by the time a real client posts a file the record exists — and once the owner
+    changes it, the link the guest still holds no longer speaks for them. That is
+    the point: revocation has to survive the guest keeping the URL.
+    """
+    if not current_user.is_authenticated:
+        return False
+    if album.owner_id == current_user.id:
+        return True
+    access = album_access_for(album)
+    return access is not None and access.access_type == 'upload'
+
+
 def _album_for_token(token):
     """Return the album behind a share token, or 404. No permission check."""
     album = db.session.query(Album).filter_by(token=token).one_or_none()
@@ -53,19 +147,35 @@ def _album_for_token(token):
     return album
 
 
-def _album_for_upload(token):
-    """Return the album behind an upload share token, aborting if it cannot accept uploads.
+def _album_for_readable(token):
+    """Return the album behind an upload share token, or abort if the caller may not read it."""
+    album = _album_for_token(token)
+    if not may_read_album(album):
+        abort(403)
+    return album
 
-    Called at the top of every chunked endpoint, not just at init. A 470 MB file is
-    ~59 requests spread over minutes, and the owner can switch ``allow_upload`` off at
-    any point in that window; the permission that let the first chunk through says
-    nothing about the last one, or about ``complete``.
+
+def _album_for_upload(token):
+    """Return the album behind an upload share token, aborting if the caller cannot upload now.
+
+    Two separate refusals, both re-evaluated at the top of every chunked endpoint
+    rather than once at init. A 470 MB file is ~59 requests spread over minutes,
+    and in that window the owner can switch ``allow_upload`` off *or* downgrade
+    this particular guest to view-only; the permission that let the first chunk
+    through says nothing about the last one, or about ``complete``.
+
+    The album-wide switch is reported first because it is the answer that holds for
+    everyone — a guest whose grant is intact should be told the album is closed,
+    not that they lack access.
 
     ``cancel`` deliberately does not use this — see the endpoint.
     """
     album = _album_for_token(token)
     if not album.allow_upload:
         abort(make_response(jsonify({'error': 'Uploads are disabled for this album.'}), 403))
+    if not may_upload_to(album):
+        abort(make_response(
+            jsonify({'error': 'You do not have upload access to this album.'}), 403))
     return album
 
 
@@ -96,7 +206,19 @@ def register(app):
 
     @app.route('/share/<token>', methods=['GET'])
     def album_upload(token):
-        """Redirect the share link to the album page. Sets the upload session token so the guest can upload."""
+        """Redirect the share link to the album page, remembering which link was followed.
+
+        ``album_upload_token`` is a breadcrumb, not a capability: it records that this
+        visitor arrived through the upload link, so the album page knows to mint an
+        ``upload`` grant rather than a ``view`` one. Its value is the token the caller
+        just typed into their own address bar, so the session tells them nothing they
+        did not already have — which is precisely the property the ``album_access_token``
+        it replaced did not have.
+
+        No login wall, deliberately: an anonymous visitor is redirected to the album
+        page, which shows them the request-permission notice, and the breadcrumb is
+        waiting in their session once they have an account.
+        """
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
             abort(404)
@@ -106,11 +228,21 @@ def register(app):
     @app.route('/view/<view_token>', methods=['GET'])
     @login_required
     def album_view_only(view_token):
-        """Render the view-only shared page for an album. Guests can browse photos but cannot upload."""
+        """Render the view-only shared page for an album. Guests can browse photos but cannot upload.
+
+        The visit mints a ``view`` grant, and that row — not anything handed to the
+        browser — is what makes the page's media requests work. This route used to
+        write ``album.token``, the *upload* token, into the visitor's session so that
+        ``serve_media`` would answer them. The session cookie is signed but not
+        encrypted, so that amounted to emailing the upload capability to everyone
+        given a view-only link: decode your own cookie, recover the token, upload
+        (#35). An existing grant is left exactly as it stands — arriving through the
+        view link must not silently downgrade a contributor, and it must not be a
+        route by which anyone upgrades themselves either.
+        """
         album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
         if album is None:
             abort(404)
-        session['album_access_token'] = album.token
         photos = db.session.query(Photo).filter_by(album_id=album.id).order_by(Photo.uploaded_at.desc()).all()
         if not db.session.query(AlbumAccess).filter_by(
             user_id=current_user.id, album_id=album.id
@@ -134,7 +266,10 @@ def register(app):
         Validates each file by extension and MIME type, converts HEIC images to JPEG,
         generates thumbnails, and records each file in the database. Returns a JSON
         array of per-file results indicating success or a descriptive error.
-        Rejects the entire request if uploads are disabled on the album.
+        Rejects the entire request if uploads are disabled on the album, or if the
+        caller's grant does not carry upload access — the two refusals the chunked
+        path makes through ``_album_for_upload``, spelled out here because this route
+        predates that helper and answers 403 as plain JSON rather than an abort.
         """
         album = db.session.query(Album).filter_by(token=token).one_or_none()
         if album is None:
@@ -142,6 +277,9 @@ def register(app):
 
         if not album.allow_upload:
             return jsonify({'error': 'Uploads are disabled for this album.'}), 403
+
+        if not may_upload_to(album):
+            return jsonify({'error': 'You do not have upload access to this album.'}), 403
 
         files = request.files.getlist('files')
         if not files:
@@ -177,6 +315,11 @@ def register(app):
             db.session.add(photo)
             results.append({'filename': file.filename, 'success': True})
 
+        # Backstop, not the mint point. A non-owner reaching this line already has a
+        # grant — may_upload_to refused them otherwise — so in practice this only ever
+        # records the owner's own upload. It is kept because the row is also what puts
+        # an album on a contributor's dashboard, and losing that to a deleted grant
+        # would be a silent, permanent disappearance.
         if not db.session.query(AlbumAccess).filter_by(
             user_id=current_user.id, album_id=album.id
         ).first():
@@ -442,6 +585,11 @@ def register(app):
         )
         db.session.add(photo)
 
+        # Backstop, not the mint point. A non-owner reaching this line already has a
+        # grant — may_upload_to refused them otherwise — so in practice this only ever
+        # records the owner's own upload. It is kept because the row is also what puts
+        # an album on a contributor's dashboard, and losing that to a deleted grant
+        # would be a silent, permanent disappearance.
         if not db.session.query(AlbumAccess).filter_by(
             user_id=current_user.id, album_id=album.id
         ).first():
@@ -456,10 +604,13 @@ def register(app):
     @app.route('/share/<token>/download')
     @login_required
     def download_album_share(token):
-        """Stream a ZIP of all album photos to a user accessing the album via its upload share link."""
-        album = db.session.query(Album).filter_by(token=token).one_or_none()
-        if album is None:
-            abort(404)
+        """Stream a ZIP of all album photos to a grant holder on the album's upload share link.
+
+        The widest read in the app — one request, every photo — so it is authorised
+        the same way the narrowest one is. Holding the token is not enough: it is
+        what mints the grant on the album page, and this checks the grant.
+        """
+        album = _album_for_readable(token)
         buf = build_album_zip(album)
         zip_name = secure_filename(album.name or 'album') + '.zip'
         return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
@@ -467,10 +618,16 @@ def register(app):
     @app.route('/view/<view_token>/download')
     @login_required
     def download_album_view(view_token):
-        """Stream a ZIP of all album photos to a user accessing the album via its view-only share link."""
+        """Stream a ZIP of all album photos to a grant holder on the album's view-only share link.
+
+        Same rule as the upload-link sibling: the grant authorises, the token only
+        says which album is meant.
+        """
         album = db.session.query(Album).filter_by(view_token=view_token).one_or_none()
         if album is None:
             abort(404)
+        if not may_read_album(album):
+            abort(403)
         buf = build_album_zip(album)
         zip_name = secure_filename(album.name or 'album') + '.zip'
         return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)

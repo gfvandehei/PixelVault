@@ -166,7 +166,15 @@ def register(app):
 
     @app.route('/album/<token>')
     def album_view(token):
-        """Render the album view. Owners see full management UI; guests with the share token see gallery and upload. Unauthenticated visitors see the request-permission page."""
+        """Render the album view. Owners see full management UI; guests with the share token see gallery and upload. Unauthenticated visitors see the request-permission page.
+
+        This is where a share token is spent: the non-owner branch mints the
+        ``AlbumAccess`` grant that every later request is judged against, with its
+        ``access_type`` fixed by which of the album's two links the visitor followed.
+        Nothing is written to the session — the grant is a server-side row precisely
+        so that no capability travels in a cookie the holder can read (see the module
+        docstring in routes/share.py).
+        """
         if not current_user.is_authenticated:
             return render_template('request_permission.html')
 
@@ -185,8 +193,9 @@ def register(app):
             can_upload = True
             accesses = db.session.query(AlbumAccess).filter_by(album_id=album.id).all()
         else:
-            # Grant media access for this session so serve_media works for the guest
-            session['album_access_token'] = album.token
+            # No session write here. serve_media authorises the guest on the
+            # AlbumAccess row minted below, which is the same fact stored where the
+            # guest cannot read or replay it.
             share_url = None
             view_share_url = None
             download_url = url_for('download_album_share', token=token)
@@ -213,7 +222,16 @@ def register(app):
     @app.route('/album/<token>/access/<int:user_id>', methods=['POST'])
     @login_required
     def set_album_access(token, user_id):
-        """Allow the album owner to change a guest's access type between 'upload' and 'view'."""
+        """Allow the album owner to change a guest's access type between 'upload' and 'view'.
+
+        The row this writes is enforced server-side by ``share.may_upload_to`` on every
+        upload endpoint, so a downgrade revokes the capability rather than only hiding
+        the widget (#38). What it does *not* do is invalidate the link: a guest who
+        copied ``/share/<token>`` still holds a working share URL, and re-visiting the
+        album page will not re-mint them an ``upload`` grant — the first-visit branch
+        only fires when no row exists. Rotating ``album.token`` on downgrade is the
+        stronger move and is deliberately left out of this change.
+        """
         try:
             album = db.session.query(Album).filter_by(token=token).one()
         except NoResultFound:

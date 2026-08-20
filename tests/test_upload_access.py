@@ -36,8 +36,15 @@ def _session_count(app):
 # ── A session belongs to one user ──────────────────────────────────────────
 
 def test_another_users_session_is_reported_missing_not_forbidden(
-        protocol, other_client, album, multi_chunk_jpeg):
-    """403 would confirm to a stranger that the handle they hold is real. §8."""
+        protocol, other_client, other_user, album, grant_access, multi_chunk_jpeg):
+    """404 would confirm to another caller that the handle they hold is real. §8.
+
+    Mallory is given a real upload grant here, so the refusal under test is about
+    the *session handle* and nothing else: with no grant she would be turned away
+    at the album (403) before the handle was ever looked up, and the test would
+    pass for the wrong reason.
+    """
+    grant_access(album.id, other_user.id, "upload")
     upload_id, cursor = _started(protocol, multi_chunk_jpeg)
     mallory = ProtocolClient(other_client, album.token)
 
@@ -48,7 +55,11 @@ def test_another_users_session_is_reported_missing_not_forbidden(
 
 
 def test_a_foreign_chunk_does_not_move_the_owners_cursor(
-        protocol, other_client, album, multi_chunk_jpeg, session_row, partials_dir):
+        protocol, other_client, other_user, album, grant_access, multi_chunk_jpeg,
+        session_row, partials_dir):
+    """Mallory is a legitimate contributor to this album — and still cannot write
+    into someone else's partial."""
+    grant_access(album.id, other_user.id, "upload")
     upload_id, cursor = _started(protocol, multi_chunk_jpeg)
     mallory = ProtocolClient(other_client, album.token)
 
@@ -59,7 +70,9 @@ def test_a_foreign_chunk_does_not_move_the_owners_cursor(
 
 
 def test_the_owner_can_still_finish_after_a_foreign_attempt(
-        protocol, other_client, album, multi_chunk_jpeg, photos, stored_bytes):
+        protocol, other_client, other_user, album, grant_access, multi_chunk_jpeg,
+        photos, stored_bytes):
+    grant_access(album.id, other_user.id, "upload")
     upload_id, cursor = _started(protocol, multi_chunk_jpeg)
     ProtocolClient(other_client, album.token).chunk(upload_id, cursor, b"\x00" * 4096)
 

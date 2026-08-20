@@ -341,9 +341,11 @@ def test_the_byte_quota_and_the_session_quota_are_told_apart_by_their_message(pr
     assert "in-flight limit" not in by_count.get_json()["error"]
 
 
-def test_the_byte_quota_counts_only_the_calling_user(protocol, other_client, album):
+def test_the_byte_quota_counts_only_the_calling_user(protocol, other_client, other_user,
+                                                     album, grant_access):
     """Quotas are per user; one uploader must not be able to lock everyone else out."""
     from tests.protocol import ProtocolClient
+    grant_access(album.id, other_user.id, "upload")
     mallory = ProtocolClient(other_client, album.token)
     protocol.init("big-a.jpg", 3 * MB)
 
@@ -351,8 +353,10 @@ def test_the_byte_quota_counts_only_the_calling_user(protocol, other_client, alb
     assert mallory.init("big-c.jpg", 3 * MB).status_code == 201
 
 
-def test_the_session_quota_counts_only_the_calling_user(protocol, other_client, album):
+def test_the_session_quota_counts_only_the_calling_user(protocol, other_client, other_user,
+                                                        album, grant_access):
     from tests.protocol import ProtocolClient
+    grant_access(album.id, other_user.id, "upload")
     mallory = ProtocolClient(other_client, album.token)
     _open_sessions(protocol, TEST_MAX_SESSIONS)
 
