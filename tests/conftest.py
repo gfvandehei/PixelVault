@@ -218,7 +218,8 @@ def _make_user(username, email, password="correct horse battery staple", is_admi
     user.password_hash = "pbkdf2:sha256:600000$test$deadbeef"
     db.session.add(user)
     db.session.commit()
-    return Ref(id=user.id, username=user.username, email=user.email)
+    return Ref(id=user.id, username=user.username, email=user.email,
+               session_token=user.session_token)
 
 
 @pytest.fixture
@@ -259,15 +260,22 @@ def album(app, user):
 
 # ── Clients ────────────────────────────────────────────────────────────────
 
-def login(client, user_ref):
+def login(client, user_ref, session_token=None):
     """Put a Flask-Login session cookie on the client without hitting /login.
 
     Going through the real login form would spend 600k PBKDF2 rounds per test
     and burn the login endpoint's rate limit; the session keys below are exactly
     what ``login_user()`` writes.
+
+    ``_user_id`` is ``User.get_id()``, which is ``"<id>:<session_token>"`` and not
+    the bare primary key — ``extensions.load_user`` verifies the token half, so a
+    session written without it is anonymous (docs/account_page_design.md §2).
+    ``session_token`` may be passed explicitly to forge a session that a later
+    rotation is expected to invalidate.
     """
+    token = session_token if session_token is not None else user_ref.session_token
     with client.session_transaction() as sess:
-        sess["_user_id"] = str(user_ref.id)
+        sess["_user_id"] = f"{user_ref.id}:{token}"
         sess["_fresh"] = True
 
 

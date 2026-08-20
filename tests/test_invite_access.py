@@ -106,9 +106,14 @@ def submit(client, username=GOOD_USERNAME, password=GOOD_PASSWORD, confirm=None,
 
 
 def logged_in_id(client):
-    """The user id Flask-Login has on this client's session, or None."""
+    """The user id Flask-Login has on this client's session, or None.
+
+    ``_user_id`` is ``User.get_id()``, which since the account page is
+    ``"<id>:<session_token>"``; the id alone is what these tests are asking about.
+    """
     with client.session_transaction() as sess:
-        return sess.get("_user_id")
+        raw = sess.get("_user_id")
+    return None if raw is None else raw.partition(":")[0]
 
 
 def stashed_token(client):

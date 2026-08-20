@@ -1,4 +1,4 @@
-from . import auth, albums, share, media, api, admin
+from . import auth, albums, share, media, api, admin, account
 
 
 def register_all(app):
@@ -8,3 +8,4 @@ def register_all(app):
     media.register(app)
     api.register(app)
     admin.register(app)
+    account.register(app)

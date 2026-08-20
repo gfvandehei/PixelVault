@@ -59,6 +59,15 @@ def create_app():
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
+    # Flask-Login's remember cookie is configured separately from Flask's session
+    # cookie and defaults to no SameSite attribute at all. The app has no CSRF
+    # tokens, so SameSite is what stands between a cross-site POST and an
+    # authenticated one — leaving one of the two cookies without it would let a
+    # remembered login supply the identity the session cookie refused to
+    # (docs/account_page_design.md §7).
+    app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+    app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
+    app.config['REMEMBER_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
 
     # The upload caps come from independent env vars that have to agree, and a
     # disagreement is otherwise invisible: the operator sees uploads refused at init
@@ -186,7 +195,7 @@ def _validate_mail_config():
 
 def _run_migrations():
     """Add new columns to existing databases without breaking old deployments."""
-    from .models import Album
+    from .models import Album, User
 
     with db.engine.connect() as conn:
         for stmt in [
@@ -233,6 +242,13 @@ def _run_migrations():
             # database created by create_all() and one arrived at by migration end up
             # with the same schema rather than two indexes doing one job.
             "CREATE INDEX IF NOT EXISTS ix_allowed_email_token_hash ON allowed_email (token_hash)",
+            # The per-user session token behind the account page's "log out my
+            # other devices" (docs/account_page_design.md §2). The empty literal
+            # is a placeholder, not a value: SQLite will not take a non-constant
+            # DEFAULT on ADD COLUMN, and a token shared by every row would make
+            # every user's cookie interchangeable. The backfill below gives each
+            # row its own, exactly as view_token does.
+            "ALTER TABLE user ADD COLUMN session_token VARCHAR(36) NOT NULL DEFAULT ''",
         ]:
             try:
                 conn.execute(db.text(stmt))
@@ -243,4 +259,9 @@ def _run_migrations():
     for album in albums:
         album.view_token = str(uuid.uuid4())
     if albums:
+        db.session.commit()
+    users = db.session.query(User).filter(User.session_token == '').all()
+    for user in users:
+        user.session_token = str(uuid.uuid4())
+    if users:
         db.session.commit()
