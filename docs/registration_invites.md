@@ -241,6 +241,18 @@ state is computed at render time — but the table grows, so delete rows you are
 Removing an accepted row does not touch the account, so an accepted row can be cleared once you
 no longer care to know who invited whom.
 
+### "I forgot my password"
+
+Not an invite problem, and not yet self-service. A user who is signed in can change their own
+password at `/account`, but there is no reset flow for one who cannot get in — the invite
+machinery deliberately does not double as one, because an invite creates an account and a reset
+must not. Until [#33](https://github.com/gfvandehei/PixelVault/issues/33) lands, the only remedy
+is setting the hash by hand. Do **not** delete the account and re-invite the address: the albums
+and photos belong to the user row.
+
+Note that changing a password signs that user out of every device, which is expected and is
+stated on the page and in the email they receive.
+
 The invite endpoints are rate-limited per IP: 60/hour for clicking a link and 20/hour for
 submitting the form. Admin actions are limited per user: 60/hour for adding an address, 30/hour
 each for resend and copy-link. Limits live in per-worker memory and reset on deploy, so they

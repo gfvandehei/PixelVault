@@ -1,3 +1,4 @@
+import secrets
 import sqlite3
 
 from flask import current_app, flash, jsonify, request
@@ -53,7 +54,37 @@ login_manager.login_message = 'Please log in to access this page.'
 
 @login_manager.user_loader
 def load_user(user_id):
-    return db.session.get(User, int(user_id))
+    """Resolve the ``"<id>:<session_token>"`` identity in a cookie back to a User.
+
+    The token half is the point (docs/account_page_design.md §2). Flask-Login puts
+    ``User.get_id()`` in both the session cookie and the remember-me cookie, so
+    checking only the id would make every cookie immortal — a password change
+    could not evict a stolen one, which is the whole reason the account page
+    rotates the token.
+
+    Three shapes are refused, all by returning None so Flask-Login treats the
+    request as anonymous:
+
+    * a bare id with no ``:`` — a cookie minted before this feature existed.
+      Deliberately rejected rather than grandfathered: accepting it would let a
+      pre-deploy cookie survive the very password change made to revoke it. The
+      cost is that everyone signs in once more on the deploy that ships this.
+    * a non-integer id, which no cookie this app issues can contain;
+    * a token that does not match the row's current one — a rotated-away session.
+    """
+    ident, sep, token = str(user_id).partition(':')
+    if not sep:
+        return None
+    try:
+        user = db.session.get(User, int(ident))
+    except ValueError:
+        return None
+    # Compared as bytes: compare_digest raises TypeError on a str containing
+    # non-ASCII, and a 500 is a poor answer to a malformed cookie.
+    if user is None or not secrets.compare_digest(
+            user.session_token.encode(), token.encode()):
+        return None
+    return user
 
 
 def _wants_json():
