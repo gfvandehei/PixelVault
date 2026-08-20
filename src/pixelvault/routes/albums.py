@@ -7,7 +7,7 @@ from werkzeug.utils import secure_filename
 from ..extensions import db, limiter
 from ..models import Album, Photo, AlbumAccess, User
 from ..uploads import discard_sessions_for_album
-from ..utils import delete_photo_files, build_album_zip
+from ..utils import delete_photo_files, send_album_zip, ALBUM_ZIP_RATE_LIMIT
 from flask import current_app, send_file
 from sqlalchemy.exc import NoResultFound
 
@@ -289,8 +289,11 @@ def register(app):
         db.session.commit()
         return jsonify({'success': True})
 
+    # Sized and justified next to the cost it bounds; see ALBUM_ZIP_RATE_LIMIT
+    # in utils.py. Keyed per user id, not per IP.
     @app.route('/album/<token>/download')
     @login_required
+    @limiter.limit(ALBUM_ZIP_RATE_LIMIT)
     def download_album(token):
         """Stream a ZIP archive of all photos in the album to the owner as a file download."""
         try:
@@ -299,9 +302,7 @@ def register(app):
             abort(404)
         if album.owner_id != current_user.id:
             abort(403)
-        buf = build_album_zip(album)
-        zip_name = secure_filename(album.name or 'album') + '.zip'
-        return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+        return send_album_zip(album)
 
     @app.route('/album/<token>/settings', methods=['POST'])
     @login_required

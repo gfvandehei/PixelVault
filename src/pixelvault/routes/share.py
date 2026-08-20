@@ -32,7 +32,7 @@ The three helpers below (``album_access_for``, ``may_read_album``,
 four copies of an access rule is four chances for one of them to drift.
 """
 
-from flask import (render_template, request, url_for, abort, jsonify, send_file,
+from flask import (render_template, request, url_for, abort, jsonify,
                    redirect, session, current_app, make_response)
 from flask_login import login_required, current_user
 from werkzeug.utils import secure_filename
@@ -45,7 +45,8 @@ from ..uploads import (UploadError, OffsetMismatch, SessionUnusable, append_chun
                        is_valid_client_key, maybe_sweep_expired_sessions,
                        open_or_recover_session)
 from ..utils import (ImageTooLargeError, validate_file, validate_file_header, validate_stored_file,
-                     save_file, store_upload, build_album_zip)
+                     save_file, store_upload, send_album_zip,
+                     ALBUM_ZIP_RATE_LIMIT)
 
 # Headroom over one chunk for the per-route body cap. A chunk is exactly
 # UPLOAD_CHUNK_SIZE, but a client is entitled to send a short final one and the
@@ -601,8 +602,11 @@ def register(app):
         discard_session(db.session, upload_session, upload_dir)
         return jsonify({'results': [{'filename': filename, 'success': True}]})
 
+    # Sized and justified next to the cost it bounds; see ALBUM_ZIP_RATE_LIMIT
+    # in utils.py. Keyed per user id, not per IP.
     @app.route('/share/<token>/download')
     @login_required
+    @limiter.limit(ALBUM_ZIP_RATE_LIMIT)
     def download_album_share(token):
         """Stream a ZIP of all album photos to a grant holder on the album's upload share link.
 
@@ -611,12 +615,13 @@ def register(app):
         what mints the grant on the album page, and this checks the grant.
         """
         album = _album_for_readable(token)
-        buf = build_album_zip(album)
-        zip_name = secure_filename(album.name or 'album') + '.zip'
-        return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+        return send_album_zip(album)
 
+    # Sized and justified next to the cost it bounds; see ALBUM_ZIP_RATE_LIMIT
+    # in utils.py. Keyed per user id, not per IP.
     @app.route('/view/<view_token>/download')
     @login_required
+    @limiter.limit(ALBUM_ZIP_RATE_LIMIT)
     def download_album_view(view_token):
         """Stream a ZIP of all album photos to a grant holder on the album's view-only share link.
 
@@ -628,6 +633,4 @@ def register(app):
             abort(404)
         if not may_read_album(album):
             abort(403)
-        buf = build_album_zip(album)
-        zip_name = secure_filename(album.name or 'album') + '.zip'
-        return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+        return send_album_zip(album)

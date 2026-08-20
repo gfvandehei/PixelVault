@@ -250,6 +250,7 @@ Both links respect the album-level `allow_upload` toggle.
 | Invite submit (`POST /invite`) | 20/hour (per IP) |
 | Upload (legacy single-request) | 600/hour |
 | Album create | 30/hour |
+| Album ZIP download (owner / share / view — one bucket each) | 10/hour |
 | Admin email add (issues + sends an invite) | 60/hour |
 | Admin invite resend | 30/hour |
 | Admin invite copy-link | 30/hour |
@@ -264,6 +265,16 @@ upload is ~63 chunks and spends nothing, while every refusal (409/422/413/400/40
 charged so no status is a free 8 MiB sink. It has to be that generous because
 Flask-Limiter checks the limit on entry even when it does not deduct — a small budget
 spent on failures would start rejecting the good chunks too.
+
+The album-download budget is sized the other way round — for *cost per call*, not for
+volume. One call reads the whole album off the media volume, DEFLATEs it, stages the
+archive back onto that same volume and streams it out, so ten an hour is already more
+archives than any human clicking a link produces, while leaving room for the
+phone-on-hotel-wifi case where a multi-gigabyte transfer dies and gets retried.
+`rate_limit_key` resolves an authenticated caller to `user:<id>`, so this is a real
+per-account budget rather than a bucket shared by everyone behind one NAT. The number
+lives in `ALBUM_ZIP_RATE_LIMIT` in [utils.py](src/pixelvault/utils.py), next to the
+cost it bounds.
 
 ---
 
@@ -336,6 +347,7 @@ spent on failures would start rejecting the good chunks too.
 | `test_invite_email.py` | The composed invitation: both parts, the link's origin, refusal to compose without `PUBLIC_BASE_URL` |
 | `test_invite_admin.py` | The panel's four actions, the issue-commit-then-send order, and what each failure flashes |
 | `test_invite_access.py` | **The email cannot be overridden via the form**; bad/expired/replayed tokens; accepting while signed in; `/register` is gone; rate limits |
+| `test_album_download.py` | Archive contents and duplicate-name suffixing; that peak memory does not scale with album size; that the staging file and its descriptor never leak; the per-user download budget |
 
 `conftest.py` sets the environment before importing the app, because `config.py` reads
 env vars at module import time — which is why the invite TTL and resend cooldown are chosen
