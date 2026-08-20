@@ -1,5 +1,6 @@
 import os
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
 from flask import Flask, render_template
@@ -26,6 +27,12 @@ def create_app():
     route modules, attaches security headers to every response, sets up error handlers,
     and runs any pending database migrations before returning the ready app instance.
     """
+    # Before anything else. Everything below this line — the database, the
+    # migrations, the seeded admin — is work done on behalf of an app whose
+    # sessions may be unsignable or forgeable, and the cheapest moment to say so
+    # is the first one.
+    _validate_secret_key()
+
     app = Flask(
         __name__,
         template_folder=str(TEMPLATES_FOLDER.absolute()),
@@ -59,6 +66,37 @@ def create_app():
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
+
+    # ── "Remember me" cookie ───────────────────────────────────────────────
+    # Flask-Login's remember_token is a second, independent authenticator: given
+    # one, Flask-Login rebuilds a full session from it with no session cookie
+    # present at all. It therefore needs *at least* everything the session cookie
+    # above has, and its defaults ship with none of it
+    # (REMEMBER_COOKIE_SECURE=False, REMEMBER_COOKIE_SAMESITE=None).
+    #
+    # Both flags are load-bearing for a different reason:
+    #
+    # * Without Secure, a single http:// request — a typed address, an old
+    #   bookmark, a link in an email — puts a year-long credential on the wire in
+    #   cleartext before the redirect to https:// happens. HSTS does not help: it
+    #   only arrives on an HTTPS response, so a browser that has not been here
+    #   over TLS yet has nothing pinned.
+    # * Without SameSite, browsers that do not default to Lax send it on
+    #   cross-site POSTs. Since it authenticates on its own, the session cookie's
+    #   SameSite=Lax buys nothing — a cross-site form post carrying only this
+    #   cookie was enough to delete an album (#36).
+    #
+    # Secure tracks SESSION_COOKIE_SECURE rather than being hard-coded, so HTTPS
+    # is the one switch that governs both; hard-coding True would silently break
+    # "remember me" on a plain-HTTP deployment instead of hardening it.
+    app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+    app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
+    app.config['REMEMBER_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
+    # Flask-Login's default is 365 days. A bearer token that survives a year
+    # outlives the laptop it was issued to; 30 days matches
+    # PERMANENT_SESSION_LIFETIME above so the two halves of "still signed in"
+    # expire together.
+    app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=30)
 
     # The upload caps come from independent env vars that have to agree, and a
     # disagreement is otherwise invisible: the operator sees uploads refused at init
@@ -141,6 +179,36 @@ def create_app():
         _run_migrations()
 
     return app
+
+
+def _validate_secret_key():
+    """Refuse to boot on a session secret that cannot sign a cookie safely.
+
+    The same shape of decision as :func:`_validate_mail_config` below — a
+    configuration fault that is invisible until it matters, made loud at deploy
+    time instead — and the opposite of the ``validate_upload_limits()`` loop in
+    ``create_app()``, which reports the same ``(severity, message)`` pairs and
+    never stops the app. ``check_secret_key()`` in ``config.py`` carries the
+    argument for why these particular faults have no degraded mode worth having:
+    the two error cases are outages whose symptom (random logouts, blanket 500s)
+    points nowhere near the cause, and the third is a working key published in a
+    public repository, which is an authentication bypass that produces no symptom
+    at all.
+
+    Only the first error is raised. They are mutually exclusive today, and
+    reporting one cause per crash keeps the message a container operator sees in
+    ``docker logs`` down to the single thing they have to change.
+
+    Logs through ``logging.getLogger(__name__)`` rather than ``app.logger``
+    because this runs before the ``Flask`` object exists. The two are the same
+    logger anyway — Flask names its logger after the app's import name, which for
+    this package is exactly ``__name__``.
+    """
+    logger = logging.getLogger(__name__)
+    for severity, message in check_secret_key():
+        if severity == 'error':
+            raise RuntimeError(message)
+        logger.warning('SECRET_KEY advisory: %s', message)
 
 
 def _validate_mail_config():
