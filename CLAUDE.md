@@ -15,6 +15,7 @@ Accounts exist only by invitation: an admin adds an address, the app emails a si
 | Backend | Flask 3.1+, SQLAlchemy ORM, Flask-Login, Flask-Limiter |
 | Database | SQLite (via SQLAlchemy) |
 | Auth | Flask-Login + bcrypt (600k rounds) |
+| CSRF | Flask-WTF `CSRFProtect` — app-wide, no forms library involved |
 | Image Processing | Pillow, pillow-heif (HEIC support) |
 | File Validation | python-magic (MIME type verification) |
 | Frontend | Jinja2 templates + vanilla JS |
@@ -241,6 +242,44 @@ Each `Album` has two tokens:
 
 Both links respect the album-level `allow_upload` toggle.
 
+### CSRF Protection
+`CSRFProtect(app)` in [__init__.py](src/pixelvault/__init__.py) guards **every** POST, PUT,
+PATCH and DELETE in the app. It is a `before_request` hook, not a per-view decorator, and
+that is the whole design: a route added next year is protected because nobody had to
+remember anything. `tests/test_csrf.py` asserts that of the live `url_map`, so the day
+someone reaches for `@csrf.exempt` a test fails instead of a hole opening quietly.
+
+Nothing here uses WTForms. Flask-WTF is pulled in for `CSRFProtect` alone — forms stay
+hand-written Jinja, and `csrf_token()` is the only thing the templates gain.
+
+Four kinds of caller, three ways to carry the token:
+
+| Caller | How the token travels |
+|---|---|
+| Browser form POST | `<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">` |
+| In-page `fetch` (delete photo) | `X-CSRFToken` header, read from the meta tag |
+| Chunk upload (`application/octet-stream`) | `X-CSRFToken` header — the body is raw bytes, so there is no field to use |
+| Fire-and-forget `DELETE` (`upload/cancel`) | `X-CSRFToken` header |
+
+Load-bearing details:
+
+- **The token is rendered once per page** as `<meta name="csrf-token">` in
+  [base.html](templates/base.html), and `uploader.js` re-reads that tag *per request*
+  rather than capturing it at construction. An uploader built at page load may still be
+  running an hour later.
+- **`WTF_CSRF_TIME_LIMIT = None`.** Flask-WTF's one-hour default is shorter than a single
+  legitimate action here — a 470 MB video is ~59 requests — and a token expiring mid-file
+  fails chunks with a `400` indistinguishable from corruption. The token still dies with
+  the session, so this swaps a second weaker clock for the session's own rather than
+  removing a clock.
+- **A rejected token answers in the caller's dialect**, JSON for XHR and the error page for
+  a browser, for the same reason `handle_unauthorized` does: uploader.js reads `body.error`,
+  and an HTML page reaches it as the useless "Upload failed (HTTP 400)".
+- **`400`, not `403`.** A `403` from an upload endpoint is already spoken for — uploader.js
+  reports it as "Uploads are disabled for this album".
+- The wire contract for the upload endpoints is
+  [docs/upload_protocol.md §6.0](docs/upload_protocol.md); `tests/protocol.py` mirrors it.
+
 ### Rate Limits (Flask-Limiter)
 | Endpoint | Limit |
 |---|---|
@@ -265,10 +304,28 @@ charged so no status is a free 8 MiB sink. It has to be that generous because
 Flask-Limiter checks the limit on entry even when it does not deduct — a small budget
 spent on failures would start rejecting the good chunks too.
 
+**A CSRF rejection is the one refusal that is *not* charged.** It aborts before the
+limiter's deferred deduction sees a response, and that is the right way round twice over:
+it never reads the 8 MiB body the budget protects, so it is cheaper than the `409` beside
+it; and its likeliest cause is a page left open across a logout, where charging would keep
+the user locked out for an hour *after* the reload that fixed the problem. A refusal whose
+remedy is "reload" must not outlive the reload. Pinned by `tests/test_csrf.py`, because an
+extension upgrade could reverse it silently.
+
 ---
 
 ## Security Notes
 
+- **Every state-changing request carries a CSRF token** — `CSRFProtect` checks every POST,
+  PUT, PATCH and DELETE in a `before_request` hook, so a new route is protected by default
+  rather than by remembering a decorator. Forms carry a hidden `csrf_token` field; the XHR
+  and `fetch` callers send `X-CSRFToken`. Before this, `SESSION_COOKIE_SAMESITE = 'Lax'` was
+  the only thing between a cross-site POST and album deletion — a single point of failure,
+  and one already defeated by a `remember_token` cookie that authenticates on its own.
+  `SameSite` remains as defence in depth; it is no longer the defence.
+- The check runs **before** `@login_required` and before the view, so a forged request never
+  reaches a database session — the album, the photo and the invite are still there
+  afterwards, which is what `tests/test_csrf.py` asserts rather than merely asserting a 400.
 - Registration is **invite-only and link-only**: there is no `/register`. An admin issues an
   invite, the app emails a single-use TTL-bounded link, and accepting it is the only way an
   account is created.
@@ -336,12 +393,21 @@ spent on failures would start rejecting the good chunks too.
 | `test_invite_email.py` | The composed invitation: both parts, the link's origin, refusal to compose without `PUBLIC_BASE_URL` |
 | `test_invite_admin.py` | The panel's four actions, the issue-commit-then-send order, and what each failure flashes |
 | `test_invite_access.py` | **The email cannot be overridden via the form**; bad/expired/replayed tokens; accepting while signed in; `/register` is gone; rate limits |
+| `test_csrf.py` | The **only** module that runs with CSRF on. Each caller class refused without a token and accepted with one; the url_map sweep that covers routes not yet written; the templates scanned for a POST form missing its field |
 
 `conftest.py` sets the environment before importing the app, because `config.py` reads
 env vars at module import time — which is why the invite TTL and resend cooldown are chosen
 there and not inside a test. A `mailer` fixture swaps a `MemoryMailer` into
 `app.extensions['mailer']`, so every test asserts on what *would* have been sent, with no
 network and no monkeypatched module globals.
+
+The shared `app` fixture also sets **`WTF_CSRF_ENABLED = False`**. No test outside
+`test_csrf.py` is about CSRF, and every one of them posts without a browser having rendered a
+token first — leaving it on would turn all of them into a 400 that says nothing about what
+they were testing. It is a config flag rather than an unregistered extension precisely so
+`test_csrf.py` can flip that same key back to `True` for the duration of a test and drive the
+real endpoints through the real hook. It flips a flag rather than building a second app
+because `create_app()` re-registers every route on the module-level limiter singleton.
 
 Coverage is upload- and invite-focused; the rest of the app is still verified manually via the
 Docker test container. See [#25](https://github.com/gfvandehei/PixelVault/issues/25).

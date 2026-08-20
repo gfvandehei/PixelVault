@@ -129,9 +129,23 @@ def app():
     shared module-level ``limiter`` singleton, so building it per test would
     stack duplicate limits on the same endpoints. Isolation comes from
     ``reset_state`` below instead.
+
+    **CSRF is switched off here** (#37). Every state-changing endpoint is
+    protected in production by ``CSRFProtect``, and none of the ~345 tests in the
+    other modules is about that: they post forms and JSON directly, with no
+    browser to have rendered a token first, so leaving it on would turn every one
+    of them into a 400 that says nothing about what it was testing.
+
+    Switching it off *here*, in the shared fixture, rather than per test, is what
+    keeps that decision in one greppable place — and it is a config flag rather
+    than an unregistered extension so the protection is still wired up, still
+    reachable, and can be turned back on for the tests that are about it.
+    ``tests/test_csrf.py`` flips this same key to ``True`` for the duration of a
+    test and drives the real endpoints through it. It has to do it that way and
+    not by building a second app, for the limiter reason above.
     """
     application = create_app()
-    application.config.update(TESTING=True)
+    application.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     yield application
     shutil.rmtree(TEST_TMP, ignore_errors=True)
 

@@ -98,6 +98,28 @@
     }
   }
 
+  /* The page's CSRF token, or '' when the page emitted no meta tag (#37).
+
+     Every request this file makes is a POST or a DELETE, so every one of them is
+     checked by CSRFProtect — and none of them is a form submission, so there is no
+     hidden field to carry the token. It travels in `X-CSRFToken`, one of the header
+     names CSRFProtect reads by default.
+
+     Re-read from the DOM on each call rather than captured once in the Uploader
+     constructor. The uploader is built at page load and may still be alive an hour
+     later, and reading late is what lets a page that re-renders its meta tag hand
+     out the current token instead of a captured stale one. querySelector against a
+     single meta element is nothing beside an 8 MiB body.
+
+     Returning '' rather than throwing when the tag is missing is deliberate: the
+     failure then surfaces as the server's 400 with a message the user can act on,
+     rather than as a JS exception that leaves the row stuck at 'uploading'. */
+  function csrfToken() {
+    var doc = global.document;
+    var meta = doc && doc.querySelector('meta[name="csrf-token"]');
+    return (meta && meta.getAttribute('content')) || '';
+  }
+
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) node.className = className;
@@ -454,6 +476,11 @@
       var xhr = new XMLHttpRequest();
       xhr.open('DELETE', this.chunkBase + '/cancel/' + encodeURIComponent(uploadId), true);
       xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      // DELETE is a state-changing method, so CSRFProtect checks it like a POST.
+      // Nothing here reads the response, which means a rejected token would be
+      // silent and the quota would sit reserved until the TTL sweep — the failure
+      // mode this call exists to avoid.
+      xhr.setRequestHeader('X-CSRFToken', csrfToken());
       xhr.send();
     } catch (e) { /* the sweep collects it */ }
   };
@@ -631,6 +658,7 @@
 
       xhr.open(opts.method, opts.url, true);
       xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      xhr.setRequestHeader('X-CSRFToken', csrfToken());
       if (opts.contentType) xhr.setRequestHeader('Content-Type', opts.contentType);
       if (opts.headers) {
         Object.keys(opts.headers).forEach(function (name) {
@@ -745,6 +773,9 @@
 
       xhr.open('POST', self.url, true);
       xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      // Header rather than a FormData field, so both transports carry the token the
+      // same way and there is one place to look when a 400 turns up.
+      xhr.setRequestHeader('X-CSRFToken', csrfToken());
 
       xhr.upload.onprogress = function (e) {
         if (e.lengthComputable) self._onProgress(item, e.loaded, e.total);

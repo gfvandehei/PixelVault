@@ -3,6 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  {#
+    The CSRF token, once per page, for the JavaScript callers (#37). The form
+    POSTs each carry their own hidden `csrf_token` field; XHR and fetch have no
+    form to hang one on, so static/js/uploader.js and the in-page fetches read
+    this and send it as `X-CSRFToken`, which is one of the header names
+    CSRFProtect looks in by default.
+
+    Emitted on every page, including those with no form and no script, because
+    the alternative — emitting it only where something needs it — is a rule that
+    has to be re-remembered every time a page gains its first fetch call.
+  #}
+  <meta name="csrf-token" content="{{ csrf_token() }}" />
   <title>Upload to {{ album.name }} — PixelVault</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

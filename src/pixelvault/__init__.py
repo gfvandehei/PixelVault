@@ -2,11 +2,16 @@ import os
 import uuid
 from pathlib import Path
 
-from flask import Flask, render_template
+from flask import Flask, jsonify, render_template
+from flask_wtf.csrf import CSRFError, CSRFProtect
 from werkzeug.middleware.proxy_fix import ProxyFix
 import sys
 
 from .extensions import db, login_manager, limiter
+# Private, and deliberately shared rather than reimplemented: the CSRF error
+# handler below has to decide "browser or program?" exactly as the unauthorized
+# handler does, and two copies of that judgement would drift.
+from .extensions import _wants_json
 # Aliased deliberately. Importing the `pixelvault.mailer` *module* — which
 # extensions does, to build a backend — binds it as an attribute of this package,
 # and a package's attributes are this file's globals. An unaliased `mailer` proxy
@@ -60,6 +65,20 @@ def create_app():
     app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
 
+    # ── CSRF (#37) ─────────────────────────────────────────────────────────
+    # No expiry on the token itself. Flask-WTF's default is one hour, which is
+    # shorter than a single legitimate action here: a 470 MB video is ~59 chunk
+    # requests over a slow uplink, and the upload page is routinely left open
+    # while a batch runs. An hour-old token would start failing chunks mid-file
+    # with a 400 that looks exactly like corruption, and the user's only recovery
+    # would be a reload — which is the one thing that loses the in-page queue.
+    #
+    # The token is not thereby unbounded: it is derived from a per-session secret
+    # in the signed cookie, so it dies with the session (PERMANENT_SESSION_LIFETIME
+    # above) and with any logout. Dropping the time limit trades a second,
+    # weaker clock for the session's own, rather than removing a clock.
+    app.config['WTF_CSRF_TIME_LIMIT'] = None
+
     # The upload caps come from independent env vars that have to agree, and a
     # disagreement is otherwise invisible: the operator sees uploads refused at init
     # with nothing tying that back to the configuration. Logged, not raised — see
@@ -76,6 +95,13 @@ def create_app():
     login_manager.init_app(app)
     limiter.init_app(app)
     mailer_ext.init_app(app)
+    # Constructed per app rather than as a module-level singleton like db /
+    # login_manager / limiter: nothing outside create_app needs a handle on it.
+    # CSRF is enforced by a before_request hook covering *every* POST/PUT/PATCH/
+    # DELETE view at once, which is the point — a route added later is protected
+    # by default instead of by remembering a decorator. See tests/test_csrf.py,
+    # which asserts exactly that of the live url_map.
+    CSRFProtect(app)
     # ── Routes ─────────────────────────────────────────────────────────────
     # Import after extensions are bound so decorators resolve correctly
     from .routes import register_all
@@ -114,6 +140,27 @@ def create_app():
     def rate_limited(e):
         """Render a friendly 429 page when a client exceeds a rate limit."""
         return render_template('error.html', code=429, message="Too many requests. Please slow down."), 429
+
+    @app.errorhandler(CSRFError)
+    def csrf_failed(e):
+        """Answer a rejected CSRF check in the dialect the caller asked in.
+
+        The same reasoning as ``handle_unauthorized`` in extensions.py: uploader.js
+        parses every response as JSON and reads ``body.error``, so handing it an
+        HTML page produces the generic "Upload failed (HTTP 400)" and hides the one
+        instruction that fixes this — reload the page. A stale token is in fact the
+        likeliest way an upload meets this handler, because the tab that started the
+        batch may have been open across a logout in another tab.
+
+        Left at Flask-WTF's 400 rather than promoted to 403. A 403 here would be
+        indistinguishable from ``allow_upload`` having been revoked, which
+        uploader.js reports as "Uploads are disabled for this album" — a wrong and
+        unactionable message for a token problem.
+        """
+        message = 'Security token missing or expired — reload the page and try again.'
+        if _wants_json():
+            return jsonify({'error': message}), 400
+        return render_template('error.html', code=400, message=message), 400
 
     # ── CLI commands ───────────────────────────────────────────────────────
     @app.cli.command('create-admin')
