@@ -1,0 +1,87 @@
+# ── Dependency audit ──────────────────────────────────────────────────────────
+#
+# The first CI in this repository, and deliberately narrow: it audits dependencies
+# and nothing else. It does not run the test suite — adding CI for that is #25's
+# business, and bundling the two would mean a flaky test could hide a CVE.
+#
+# It answers three questions, in the order they can go wrong (#45):
+#
+#   1. Does uv.lock still describe pyproject.toml? The production image installs
+#      with `uv sync --locked`, which refuses a stale lock, so a lock that has
+#      drifted is a broken deploy waiting for the next build.
+#   2. Does the locked set contain a known vulnerability? This is the question
+#      with teeth. The floors in a manifest only bound what *may* be installed;
+#      the lock says what actually ships.
+#   3. Do the requirements.txt floors still sit at or above the lock? The floors
+#      are what a developer following the README installs, and they were the
+#      original finding — `Pillow>=10.0.0` admitted CVE-2023-50447 for as long as
+#      nothing checked.
+#
+# The weekly schedule is the point of the whole file, not a nicety. A CVE is
+# published against code that has not changed, so a workflow that only ran on
+# dependency edits would go quiet exactly when a dependency stops being safe.
+
+name: Dependency audit
+
+on:
+  pull_request:
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - requirements.txt
+      - docker/Dockerfile.*
+      - .github/workflows/dependency-audit.yml
+      - .github/scripts/check_floors.py
+  push:
+    branches: [master]
+    paths:
+      - pyproject.toml
+      - uv.lock
+      - requirements.txt
+      - docker/Dockerfile.*
+      - .github/workflows/dependency-audit.yml
+      - .github/scripts/check_floors.py
+  schedule:
+    # Monday morning UTC. An odd minute, because the top of the hour is when every
+    # scheduled workflow on GitHub queues at once.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit locked dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          # Pinned to the version docker/Dockerfile.prod installs, so CI resolves
+          # the lock exactly the way the image build does.
+          version: "0.11.32"
+
+      - name: uv.lock agrees with pyproject.toml
+        # The same assertion `uv sync --locked` makes in the production image
+        # build, made here where the fix — `uv lock` — is cheap.
+        run: uv lock --check
+
+      - name: Export the locked set
+        # --no-emit-project: the app itself is not a published package and has no
+        # advisories. --no-dev keeps the audit to what actually ships.
+        run: >-
+          uv export --frozen --no-dev --no-emit-project
+          --format requirements-txt -o locked-requirements.txt
+
+      - name: Audit the locked set against the advisory database
+        # --no-deps because the export is already fully resolved and pinned;
+        # without it pip-audit re-resolves and would audit the newest satisfying
+        # versions rather than the ones being shipped. --strict fails the job if
+        # any dependency is skipped, so a silent gap cannot pass as a clean run.
+        run: uvx pip-audit --no-deps --strict -r locked-requirements.txt
+
+      - name: requirements.txt floors are not behind the lock
+        run: uv run --no-project --with packaging python .github/scripts/check_floors.py

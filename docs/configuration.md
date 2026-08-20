@@ -333,6 +333,64 @@ be bypassed entirely.
 Rate limits on authenticated routes key on user id rather than address (see `rate_limit_key` in
 `extensions.py`), so this matters most for the pre-auth routes: login, and the invite links.
 
+### 6.1 The hop count is only true if the hops cannot be skipped
+
+`TRUSTED_PROXY_COUNT` describes a chain. It says nothing about whether a caller is obliged to
+*use* that chain, and a correct value protects nothing if the app can also be reached directly.
+That was the actual bug in [#42](https://github.com/gfvandehei/PixelVault/issues/42): the value
+was right, and `docker/prod.docker-compose.yml` published the origin on `0.0.0.0:5000`, so a
+caller could go around nginx and hand its own `X-Forwarded-For` straight to `ProxyFix` — which,
+trusting one hop, read it as the client address. The header is not even parsed as an address, so
+`X-Forwarded-For: bucket-0001` is a valid rate-limit identity and the next request can be
+`bucket-0002`. Login's 20/hour, the only brute-force defence in the app (there is no lockout and
+no captcha), stops existing at that point.
+
+The app container now publishes on `127.0.0.1:5000` only. Two things follow that are easy to get
+wrong:
+
+1. **The reverse proxy must run on the same host as the container.** It reaches the app at
+   `http://127.0.0.1:5000`. If your proxy is on a different machine, do not go back to
+   `0.0.0.0` — bind the published port to the specific private interface the proxy connects
+   from (`10.0.0.5:5000:5000`), so the origin is still unreachable from everywhere else.
+2. **A host firewall is not a substitute.** Docker publishes a port with a DNAT rule in
+   iptables' `DOCKER` chain, which is consulted before the `INPUT` chain `ufw` and `firewalld`
+   write into. `ufw deny 5000` on a `0.0.0.0`-published container port denies nothing. This is
+   why the fix is the binding itself and not a firewall rule.
+
+To confirm the origin is closed, from a machine that is not the VPS:
+
+```bash
+curl -sS --max-time 5 http://YOUR_VPS_IP:5000/login   # must fail to connect
+```
+
+and from the VPS itself, that the proxy's upstream is still there:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5000/login   # 200
+```
+
+### 6.2 Recommended: recover the real client IP from Cloudflare
+
+Closing the origin fixes the bypass but leaves the other half of #42 in place. Through the
+intended chain, `x_for=1` makes `ProxyFix` take the entry nginx wrote, which behind Cloudflare is
+**Cloudflare's edge address, not the visitor's**. That is the safe direction — nobody can choose
+it — but every visitor then shares a single rate-limit bucket, so the 20/hour login limit is
+effectively global and one busy visitor locks out everyone else.
+
+The fix belongs in the VPS nginx config, not in the app: have nginx replace `$remote_addr` with
+Cloudflare's `CF-Connecting-IP`, but **only for connections that actually came from Cloudflare** —
+`set_real_ip_from` entries for every published Cloudflare range, refreshed from
+`https://www.cloudflare.com/ips-v4` and `ips-v6`. Trusting the header unconditionally would
+reintroduce exactly the bug this section is about, one layer up: any direct caller could then set
+`CF-Connecting-IP` itself. With `real_ip_header CF-Connecting-IP` and `real_ip_recursive on`,
+nginx's `$proxy_add_x_forwarded_for` starts from the visitor's address and
+`TRUSTED_PROXY_COUNT=1` is the correct value for the app.
+
+Writing that config is tracked in
+[#28](https://github.com/gfvandehei/PixelVault/issues/28), which owns the VPS-side nginx hop.
+`conf/nginx.conf` in this repo is the *bundled container* nginx and is not the file serving
+production — see the note in [upload_operations.md §2](upload_operations.md#note-on-the-nginx-hop).
+
 ---
 
 ## 7. Admin bootstrap

@@ -11,9 +11,41 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
-COPY pyproject.toml .
-RUN pip install --no-cache-dir .
+# ── Dependencies ───────────────────────────────────────────────────────────────
+# Installed from uv.lock, not from the floors in pyproject.toml. `pip install .`
+# re-resolves on every build, so two builds of the same commit could ship
+# different dependency trees — which means the image you tested is not
+# necessarily the image you deployed, and a version yanked or a version published
+# between the two changes what runs in production with no commit to point at
+# (#45). The lock names an exact version and hash for every package installed.
+#
+# uv is not in python:3.13-slim, so it is installed explicitly and pinned: an
+# unpinned installer resolving the pinned dependencies would just move the
+# irreproducibility up one level.
+RUN pip install --no-cache-dir uv==0.11.32
+
+COPY pyproject.toml uv.lock ./
+
+# --locked, not --frozen. --frozen installs the lock whatever pyproject.toml now
+# says; --locked first asserts the two still agree and fails the build if they do
+# not. That failure is the point: editing a dependency in pyproject.toml without
+# running `uv lock` would otherwise produce an image silently missing the new
+# package, which surfaces as an ImportError at boot rather than as a build error
+# with an obvious fix.
+#
+# --no-install-project because the app is not installed as a package — there is no
+# [build-system] in pyproject.toml and the source is placed on PYTHONPATH below.
+# --no-dev keeps test-only dependencies out of the runtime image.
+# UV_PYTHON_DOWNLOADS=never forces the base image's interpreter; without it uv may
+# fetch its own Python and build against a different one than the apt libraries
+# above were installed for.
+ENV UV_PYTHON_DOWNLOADS=never
+RUN uv sync --locked --no-dev --no-install-project
+
+# uv syncs into /app/.venv; put it ahead of the system interpreter so `gunicorn`
+# below resolves to the locked one.
+ENV PATH="/app/.venv/bin:$PATH"
+
 COPY ./src/pixelvault ./src/pixelvault
 COPY ./templates ./templates
 COPY ./static ./static
