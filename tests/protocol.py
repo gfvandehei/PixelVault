@@ -25,6 +25,11 @@ import hashlib
 #: is what catches a rename on either side.
 HEADER_OFFSET = "X-Upload-Offset"
 HEADER_SHA256 = "X-Chunk-SHA256"
+#: The CSRF token's header (#37). Named here for the same reason as the two above:
+#: it is a name the client and the server have to agree on, and ``X-CSRFToken`` is
+#: one of the two spellings CSRFProtect reads by default — the other,
+#: ``X-CSRF-Token``, is *not* what uploader.js sends.
+HEADER_CSRF = "X-CSRFToken"
 CHUNK_CONTENT_TYPE = "application/octet-stream"
 
 
@@ -50,10 +55,29 @@ def sha256_hex(data):
 class ProtocolClient:
     """Issues the four chunked-upload requests against one album share token."""
 
-    def __init__(self, client, token):
+    def __init__(self, client, token, csrf_token=None):
+        """``csrf_token`` is omitted by the suite at large and supplied by test_csrf.
+
+        The shared ``app`` fixture disables CSRF, so every other module drives this
+        client with no token and the header never appears — which is right, because
+        those tests are about the upload protocol and not about the token. Passing
+        one makes the four state-changing requests carry ``X-CSRFToken`` exactly as
+        ``uploader.js`` does, which is what lets test_csrf drive the *real* protocol
+        rather than a hand-rolled imitation of it.
+        """
         self.client = client
         self.token = token
+        self.csrf_token = csrf_token
         self.base = f"/share/{token}/upload"
+
+    def _headers(self, extra=None):
+        """Headers for a state-changing request: the CSRF token, plus anything given."""
+        headers = {}
+        if self.csrf_token is not None:
+            headers[HEADER_CSRF] = self.csrf_token
+        if extra:
+            headers.update(extra)
+        return headers
 
     # ── §6.1 init ──────────────────────────────────────────────────────────
 
@@ -73,7 +97,8 @@ class ProtocolClient:
             "content_type": content_type,
         }
         payload.update(overrides)
-        return self.client.post(f"{self.base}/init", json=payload)
+        return self.client.post(f"{self.base}/init", json=payload,
+                                headers=self._headers())
 
     def init_for(self, filename, data, **kwargs):
         """``init`` for a file whose bytes we already hold."""
@@ -93,10 +118,10 @@ class ProtocolClient:
         Not multipart and not JSON: the body is the chunk's bytes and nothing
         else, exactly as ``xhr.send(arrayBuffer)`` produces.
         """
-        request_headers = {
+        request_headers = self._headers({
             HEADER_OFFSET: str(offset),
             HEADER_SHA256: sha256_hex(data) if digest is None else digest,
-        }
+        })
         if headers:
             request_headers.update(headers)
         return self.client.post(
@@ -110,13 +135,15 @@ class ProtocolClient:
 
     def complete(self, upload_id):
         """POST /upload/complete/<upload_id> with an empty body."""
-        return self.client.post(f"{self.base}/complete/{upload_id}")
+        return self.client.post(f"{self.base}/complete/{upload_id}",
+                                headers=self._headers())
 
     # ── §6.5 cancel ────────────────────────────────────────────────────────
 
     def cancel(self, upload_id):
         """DELETE /upload/cancel/<upload_id> — what removeItem fires, body-less."""
-        return self.client.delete(f"{self.base}/cancel/{upload_id}")
+        return self.client.delete(f"{self.base}/cancel/{upload_id}",
+                                  headers=self._headers())
 
     # ── Composite flows ────────────────────────────────────────────────────
 
