@@ -317,7 +317,8 @@ def test_each_download_route_keeps_its_own_bucket(client, stock_album):
     assert client.get(f"/view/{album.view_token}/download").status_code == 200
 
 
-def test_the_budget_is_keyed_by_user_not_by_address(app, client, other_user, stock_album):
+def test_the_budget_is_keyed_by_user_not_by_address(app, client, other_user, stock_album,
+                                                    grant_access):
     """One account exhausting its budget does not lock out another on the same address.
 
     ``rate_limit_key`` resolves an authenticated caller to ``user:<id>``, which is
@@ -331,5 +332,12 @@ def test_the_budget_is_keyed_by_user_not_by_address(app, client, other_user, sto
     assert client.get(f"/share/{album.token}/download").status_code == 429
 
     second = app.test_client()
+
     login(second, other_user)
+
+    # The grant the new authorisation model requires of any non-owner (#38/#40).
+
+    # Without it this asserts 403 and stops describing rate limiting at all.
+
+    grant_access(album.id, other_user.id, "view")
     assert second.get(f"/share/{album.token}/download").status_code == 200
