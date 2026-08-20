@@ -26,14 +26,48 @@ by an admin, or be consumed in another tab between the two requests, and only
 re-validating catches that.
 """
 
+import secrets
+
 from flask import render_template, request, redirect, url_for, flash, session
 from flask_login import login_user, logout_user, login_required, current_user
+from werkzeug.security import check_password_hash
 
 from .. import invites
 from ..config import ADMIN_CONTACT, RE_USERNAME, MAX_PASSWORD_LEN
 from ..extensions import db, limiter
 from ..models import User, AllowedEmail
 from ..utils import is_safe_redirect
+
+
+def _make_dummy_password_hash():
+    """Return a password hash for an account that does not exist.
+
+    ``/login`` verifies it when the username is unknown, so that branch spends
+    the same 600k PBKDF2 rounds as the branch that found a user. Without it the
+    two paths differ by a factor of thirty-six — 2.8 ms against 102.5 ms as
+    measured in #43 — and one request per candidate name tells an attacker
+    whether an account exists. For an invite-only app the roster of accounts is
+    meant to be private, and a username is half a credential.
+
+    Built through ``User.set_password`` rather than by naming the algorithm here,
+    because the model owns the hashing parameters. Spelling them out a second
+    time is how the equaliser quietly stops equalising: raise the model's round
+    count and this copy keeps hashing at the old cost, restoring the gap it
+    exists to close. The instance is never added to a session; it is a hash
+    factory, not a row.
+
+    The password is random per process, so nothing about the dummy is guessable
+    and no submitted password can accidentally verify against it.
+    """
+    probe = User()
+    probe.set_password(secrets.token_urlsafe(32))
+    return probe.password_hash
+
+
+#: Computed once, at import — that is, once per worker at boot. Deriving it per
+#: request would double the cost of every login for everyone, which is the
+#: expensive way to fix a timing leak.
+_DUMMY_PASSWORD_HASH = _make_dummy_password_hash()
 
 
 #: Where the plaintext invite token lives between the click and the form.
@@ -264,7 +298,13 @@ def register(app):
         # The token is spent. Dropping it stops a browser-history "back" from
         # replaying the form against a row that can only refuse it now.
         session.pop(INVITE_SESSION_KEY, None)
-        login_user(user, remember=True)
+        # remember=False, unlike /login, where the form has a checkbox and the
+        # person ticking it is asking for a 30-day standalone authenticator. This
+        # form asks nothing, and issuing one anyway hands every brand-new account
+        # a long-lived bearer token nobody chose (#36). They are signed in either
+        # way; the difference is only whether closing the browser ends it, and
+        # the next visit's login page offers the choice properly.
+        login_user(user, remember=False)
         flash('Welcome to PixelVault!', 'success')
         return redirect(url_for('dashboard'))
 
@@ -292,8 +332,21 @@ def register(app):
                 flash('Invalid username or password.', 'error')
                 return render_template('login.html', username=username)
 
+            # Both branches hash. An unknown username used to short-circuit on
+            # `not user`, so the response time answered a question the wording
+            # was careful not to (#43): 2.8 ms meant "no such account", 102.5 ms
+            # meant "wrong password". Verifying against _DUMMY_PASSWORD_HASH
+            # spends the same 600k rounds on a hash nothing can match, so the
+            # two outcomes cost the same and only the shared message is left to
+            # read.
             user = db.session.query(User).filter_by(username=username).first()
-            if not user or not user.check_password(password):
+            if user is None:
+                check_password_hash(_DUMMY_PASSWORD_HASH, password)
+                authenticated = False
+            else:
+                authenticated = user.check_password(password)
+
+            if not authenticated:
                 flash('Invalid username or password.', 'error')
                 return render_template('login.html', username=username)
 

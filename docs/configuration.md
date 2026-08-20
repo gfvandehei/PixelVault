@@ -42,21 +42,35 @@ The app validates the mail settings at boot and refuses to start on an incoheren
 
 | Variable | Default | Required |
 |---|---|---|
-| `SECRET_KEY` | random per process | **yes, in production** |
+| `SECRET_KEY` | none — the app refuses to boot | **yes** |
 | `HTTPS` | `false` | no |
 | `FLASK_DEBUG` | `false` | no |
 | `PORT` | `5000` | no |
 | `ENV_FILE` | — | no |
 
-**`SECRET_KEY`** — signs the session cookie. The default is `os.urandom(32).hex()`, generated
-fresh on every process start, which means: with two Gunicorn workers, each worker signs with a
-*different* key, so a logged-in user is randomly logged out depending on which worker answers, and
-every restart logs everyone out. Set it. A leaked key is worse than a rotating one — anyone holding
-it can forge a session cookie for any user, including an admin, without touching a password.
-Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`.
+**`SECRET_KEY`** — signs the session cookie. **The app refuses to start without one**, and also
+refuses the `change-me-to-a-long-random-string` placeholder from `.env.example`. Generate with
+`python3 -c "import secrets; print(secrets.token_hex(32))"`.
+
+Checked at boot because all three ways of getting it wrong fail invisibly. Left unset, the old
+`os.urandom(32).hex()` default was minted per *process*, so with two Gunicorn workers each signed
+with a different key and a logged-in user was randomly logged out depending on which worker
+answered — with nothing in the logs. Set but empty — which is what `docker compose` substitutes for
+a `${SECRET_KEY}` missing from `.env.prod` — makes Flask raise on every request that writes a
+session, so login, flashes and invites all 500. Left at the placeholder, it is a real working key
+that is also published in this repository: anyone who has read it can forge a session cookie for
+any user, including an admin, without touching a password.
+
+A key shorter than 32 characters is logged as a warning rather than refused — weak, but it still
+signs consistently across workers, so a running deployment is told rather than taken down.
+
+`FLASK_DEBUG=true` is the one exemption, and only for the *unset* case: a dev checkout boots on a
+throwaway key with a warning, because one process means one key and the only cost is that
+restarting logs you out of your own laptop. The placeholder is refused even in debug.
 
 **`HTTPS`** — set `true` when the app is served over TLS. It turns on `Secure` on the session
-cookie and adds an HSTS header. Left `false` behind real HTTPS, the session cookie is willing to
+cookie *and* on Flask-Login's `remember_token` — the latter is a standalone 30-day authenticator,
+so it needs at least what the session cookie has — and adds an HSTS header. Left `false` behind real HTTPS, the session cookie is willing to
 travel over plaintext, so a single downgraded request leaks it. Set `true` on a deployment that is
 *not* fully HTTPS and browsers will discard the cookie entirely — you get an app that cannot hold a
 login, which is the confusing failure this variable produces.
@@ -343,7 +357,7 @@ Registration is invite-only, so these are the only way to create the first accou
 
 | Variable | Default | Section |
 |---|---|---|
-| `SECRET_KEY` | random per process | [Core](#2-core--security) |
+| `SECRET_KEY` | none — the app refuses to boot | [Core](#2-core--security) |
 | `HTTPS` | `false` | [Core](#2-core--security) |
 | `FLASK_DEBUG` | `false` | [Core](#2-core--security) |
 | `PORT` | `5000` | [Core](#2-core--security) |
