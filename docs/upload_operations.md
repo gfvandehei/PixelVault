@@ -100,7 +100,7 @@ flowchart TD
     B["Browser<br/>static/js/uploader.js<br/>CONCURRENCY = 3 files in parallel"]
     CF["Cloudflare edge<br/>orange-cloud proxy, TLS to client"]
     NG["VPS nginx<br/>TLS termination, reverse proxy"]
-    DP["Docker published port<br/>5000:5000 in prod.docker-compose.yml"]
+    DP["Docker published port<br/>127.0.0.1:5000:5000 in prod.docker-compose.yml<br/>loopback only — reachable from the VPS, not from off-box"]
     GU["Gunicorn<br/>gthread, 2 workers x 4 threads"]
     FL["Flask app<br/>create_app in src/pixelvault"]
     DK[("UPLOAD_FOLDER<br/>partials/UPLOAD_ID.part")]
@@ -119,7 +119,7 @@ flowchart TD
 |---|---|---|---|
 | Cloudflare | 100 MB request body (Free/Pro) | Cloudflare plan; not configurable below Enterprise | Silent stall, no status, no origin log |
 | VPS nginx | `client_max_body_size`, `client_body_timeout`, `proxy_read_timeout`, `proxy_send_timeout` | The VPS nginx config — see [#28](https://github.com/gfvandehei/PixelVault/issues/28) | 413, 408, or 504 with an nginx error page |
-| Docker port publish | none | `docker/prod.docker-compose.yml` | — |
+| Docker port publish | no size or time limit; bound to `127.0.0.1` so only the VPS itself can connect | `docker/prod.docker-compose.yml` | Connection refused from anywhere but the VPS — deliberate ([#42](https://github.com/gfvandehei/PixelVault/issues/42)) |
 | Gunicorn | `--timeout`, `--graceful-timeout`, concurrency | `docker/Dockerfile.prod` | 502, or a connection reset with `WORKER TIMEOUT` in the container log |
 | Flask | `MAX_CONTENT_LENGTH`, rate limits, per-user quotas | `src/pixelvault/config.py`, `src/pixelvault/extensions.py` | 413 / 429 rendered by `templates/error.html` |
 
@@ -130,10 +130,13 @@ did not reach the application.** Look upstream — Cloudflare first, then nginx.
 
 `conf/nginx.conf` in this repo is **not** the config serving production. It is mounted into the
 `nginx` service in `docker/prod.docker-compose.yml`, which is gated behind `profiles: [nginx]` and
-does not start by default; the real deployment terminates TLS on a separate VPS reverse proxy and
-the app container publishes `5000:5000` directly. A standalone server block for the real topology is
-tracked in [#28](https://github.com/gfvandehei/PixelVault/issues/28). Until it lands, verify the
-live values directly on the VPS rather than reading them out of this repo:
+does not start by default; the real deployment terminates TLS on a separate VPS reverse proxy, which
+reaches the app container on `127.0.0.1:5000`. A standalone server block for the real topology is
+tracked in [#28](https://github.com/gfvandehei/PixelVault/issues/28) — that is also where the
+`CF-Connecting-IP` handling recommended in
+[configuration.md §6.2](configuration.md#62-recommended-recover-the-real-client-ip-from-cloudflare)
+belongs. Until it lands, verify the live values directly on the VPS rather than reading them out of
+this repo:
 
 ```bash
 nginx -T | grep -E 'client_max_body_size|client_body_timeout|proxy_(read|send)_timeout|proxy_request_buffering'
@@ -258,6 +261,14 @@ That converts a shared bucket into a bypassable one, which is worse than the bug
 unsure, set it too low. The correct value must be confirmed against the live nginx config; see
 [#30](https://github.com/gfvandehei/PixelVault/issues/30) for the full reasoning.
 
+A caller that reaches the app *without* going through the proxy gets the same result for free, no
+matter what the count is set to: with no proxy in front, its own header is the first one and lands
+in the trusted position. That is why the published port is bound to `127.0.0.1` in
+`docker/prod.docker-compose.yml` and why `TRUSTED_PROXY_COUNT` is set in the same file — the hop
+count and the reachability of the origin are one decision described in two lines
+([#42](https://github.com/gfvandehei/PixelVault/issues/42),
+[configuration.md §6.1](configuration.md#61-the-hop-count-is-only-true-if-the-hops-cannot-be-skipped)).
+
 ---
 
 ## 5. Troubleshooting
@@ -282,7 +293,7 @@ flowchart TD
 
 | Symptom | Likely hop | How to confirm |
 |---|---|---|
-| Upload stalls at a fixed byte count, no status code, nothing in app logs | **Cloudflare edge** | `curl -sSI https://your-domain` shows `server: cloudflare` and a `cf-ray`. Compare the stall point against 100 MB. Retry the same file against the app's published port directly, bypassing the edge — if it succeeds, the edge is the cause |
+| Upload stalls at a fixed byte count, no status code, nothing in app logs | **Cloudflare edge** | `curl -sSI https://your-domain` shows `server: cloudflare` and a `cf-ray`. Compare the stall point against 100 MB. Retry the same file against the origin directly, bypassing the edge — if it succeeds, the edge is the cause. The published port is bound to loopback ([#42](https://github.com/gfvandehei/PixelVault/issues/42)), so run that test **from the VPS** against `http://127.0.0.1:5000`, or tunnel to it with `ssh -L 5000:127.0.0.1:5000 vps`. Never widen the binding to run a test |
 | **413 immediately**, before any progress | **VPS nginx** if the body is an nginx error page; **Flask** if it is `templates/error.html` | View the response body. For nginx: `nginx -T \| grep client_max_body_size` and `grep "client intended to send too large body" /var/log/nginx/error.log`. For Flask: compare the file size against `MAX_UPLOAD_MB` |
 | **504 mid-upload**, browser hangs at a fixed percentage | **VPS nginx** | `grep "upstream timed out" /var/log/nginx/error.log`. Check `proxy_read_timeout` and `proxy_send_timeout` — nginx defaults to 60 s, which one slow chunk can exceed |
 | Upload reaches **100% then hangs in "Processing"** | **Flask `complete`**, or nginx request buffering | Watch `docker compose logs -f app` for the `complete` request. If it is running, the wait is real synchronous HEIC/thumbnail work — raise `--timeout` or accept the wait. If no request has arrived, nginx is still replaying a buffered body: check `proxy_request_buffering`. A `WORKER TIMEOUT` line means gunicorn killed the worker mid-processing |
@@ -298,6 +309,31 @@ broken thumbnail, not an error page, which is why this symptom rarely looks like
 ---
 
 ## 6. Deployment and upgrade notes
+
+### Dependencies and image builds
+
+`docker/Dockerfile.prod` installs dependencies with `uv sync --locked`, from `uv.lock`. It used to
+run `pip install .`, which re-resolved the floors in `pyproject.toml` on every build — so two builds
+of the same commit could ship different dependency trees, and the image that passed testing was not
+necessarily the image that got deployed ([#45](https://github.com/gfvandehei/PixelVault/issues/45)).
+
+Three consequences for anyone changing a dependency:
+
+1. **`uv.lock` is the source of truth for the production image.** After editing `pyproject.toml`,
+   run `uv lock` and commit the result. `--locked` checks that the two agree and **fails the
+   build** if they do not — that failure is deliberate. The alternative, `--frozen`, would build an
+   image quietly missing the new package and surface it as an `ImportError` at boot instead.
+2. **`requirements.txt` is for local development only** and its floors must stay at or above the
+   locked versions. `.github/workflows/dependency-audit.yml` enforces that and audits the locked
+   set against the PyPI advisory database on every dependency change and once a week.
+3. **uv itself is pinned** in the Dockerfile. An unpinned installer resolving pinned dependencies
+   just moves the irreproducibility up a level. Bumping it is a one-line commit like any other.
+
+Rebuild after a lock change with the usual command — nothing extra is needed:
+
+```bash
+docker compose -f ./docker/prod.docker-compose.yml --env-file .env.prod up -d --build
+```
 
 ### Database
 

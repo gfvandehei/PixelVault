@@ -34,13 +34,50 @@ services:
       - ADMIN_CONTACT=${ADMIN_CONTACT:-}
       - INVITE_TTL_HOURS=${INVITE_TTL_HOURS:-72}
       - INVITE_RESEND_COOLDOWN_SECONDS=${INVITE_RESEND_COOLDOWN_SECONDS:-60}
+      # Hop count handed to ProxyFix (docs/configuration.md §6). It belongs here
+      # for the same reason as everything above — a value in .env.prod that is not
+      # in this list never reaches the container — but it belongs here especially
+      # because *this file decides the topology it describes*. The port binding
+      # below and this number are one setting in two places: change how the app is
+      # reached and this is the line that has to move with it.
+      #
+      # 1 is right for `host nginx -> app`. It becomes 2 for
+      # `Cloudflare -> host nginx -> app` IF that nginx appends with
+      # $proxy_add_x_forwarded_for. Never guess it upward: a count higher than the
+      # real chain lets the caller's own X-Forwarded-For survive into the region
+      # ProxyFix trusts, and a caller that can name its own address can mint a
+      # fresh rate-limit bucket per request.
+      - TRUSTED_PROXY_COUNT=${TRUSTED_PROXY_COUNT:-1}
     volumes:
       - ${UPLOAD_FOLDER:?UPLOAD_FOLDER not set}:/app/uploads
       - ${DATABASE_PATH:?DATABASE_PATH not set}:/app/instance
+    # ── Reachability ──────────────────────────────────────────────────────────
+    # Loopback only. The app is a plain HTTP origin with no TLS and no proxy of
+    # its own, and TRUSTED_PROXY_COUNT above tells ProxyFix to trust one hop of
+    # X-Forwarded-For — which is correct *through* the proxy and a rate-limit
+    # bypass for anyone who skips it. A caller reaching this port directly has no
+    # proxy in front, so its own X-Forwarded-For lands in the trusted position and
+    # it picks its own limiter identity: the 20/hour login limit, the only
+    # brute-force defence in the app, stops existing (#42).
+    #
+    # `127.0.0.1:` is not decoration. A bare `5000:5000` publishes on 0.0.0.0 via
+    # a DNAT rule in iptables' DOCKER chain, which is evaluated *before* the INPUT
+    # chain a host firewall writes into — so `ufw deny 5000` does not close it and
+    # the deployment looks protected while it is not.
+    #
+    # Not `expose:` — expose publishes nothing on the host at all, reaching the
+    # app only from inside this compose network. That fits the bundled `nginx`
+    # service below, but the real deployment terminates TLS on a separate VPS
+    # nginx *outside* this file (see the header of conf/nginx.conf and #28), and
+    # that process needs a host-side address to proxy_pass at. Loopback serves
+    # both: the bundled nginx still reaches the app as `app:5000` over the
+    # `internal` network, which does not involve published ports at all.
+    #
+    # The VPS nginx therefore proxies to http://127.0.0.1:5000 and must run on
+    # this same host. If it does not, do not widen this binding — put the two on a
+    # private network and bind to that interface specifically.
     ports:
-      - 5000:5000
-    #expose:
-    #  - "5000"
+      - "127.0.0.1:5000:5000"
     networks:
       - internal
 

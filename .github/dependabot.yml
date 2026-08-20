@@ -1,0 +1,54 @@
+# ── Dependabot ────────────────────────────────────────────────────────────────
+#
+# The audit workflow tells you a dependency has become unsafe; this opens the PR
+# that fixes it. Both halves are needed — an alert with no patch path is how a
+# lock file ends up years behind (#45).
+#
+# The `uv` ecosystem updates pyproject.toml *and* uv.lock together, which is what
+# `uv sync --locked` in docker/Dockerfile.prod requires: a bump to one without the
+# other fails the image build. There is deliberately no `pip` entry alongside it —
+# it would fight over pyproject.toml in the same directory. requirements.txt is
+# covered instead by the floor check in dependency-audit.yml, which fails when a
+# floor falls behind the lock, making the follow-up edit obvious and mechanical.
+
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      # One PR for routine version churn, so the queue stays readable. Security
+      # updates are excluded from grouping by Dependabot and arrive on their own,
+      # which is the behaviour worth having: the PR that matters is not buried in
+      # a batch of patch bumps.
+      all-dependencies:
+        patterns: ["*"]
+
+  # The base images carry an OS. python:3.13-slim and nginx:alpine ship a libc, a
+  # zlib, and the libjpeg/libwebp that Pillow links against — CVEs land there just
+  # as often as in the Python tree, and nothing else in this repository is looking
+  # at them.
+  - package-ecosystem: "docker"
+    directories:
+      - "/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps(docker)"
+
+  # Workflow actions are third-party code with write access to a CI run, and this
+  # repository now has CI. Keeping actions/checkout and astral-sh/setup-uv current
+  # is the cheapest supply-chain maintenance there is.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "deps(actions)"
