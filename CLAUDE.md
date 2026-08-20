@@ -14,7 +14,7 @@ Accounts exist only by invitation: an admin adds an address, the app emails a si
 |---|---|
 | Backend | Flask 3.1+, SQLAlchemy ORM, Flask-Login, Flask-Limiter |
 | Database | SQLite (via SQLAlchemy) |
-| Auth | Flask-Login + bcrypt (600k rounds) |
+| Auth | Flask-Login + PBKDF2-SHA256 (600k rounds), Flask-WTF CSRF |
 | CSRF | Flask-WTF `CSRFProtect` — app-wide, no forms library involved |
 | Image Processing | Pillow, pillow-heif (HEIC support) |
 | File Validation | python-magic (MIME type verification) |
@@ -66,6 +66,10 @@ pixelvault/
 │   ├── Dockerfile.dev              # Dev image with hot reload
 │   ├── prod.docker-compose.yml     # App + Nginx
 │   └── test.docker-compose.yml     # Test container (port 5050, pre-seeded admin)
+├── .github/
+│   ├── workflows/dependency-audit.yml  # uv lock --check, pip-audit, floor check
+│   ├── scripts/check_floors.py     # requirements.txt floors must not sit below uv.lock
+│   └── dependabot.yml              # uv + docker + github-actions
 ├── scripts/
 │   ├── create_admin.py             # Standalone admin creation (no Flask CLI needed)
 │   ├── migrate_heic.py             # Convert stored HEIC files to JPEG
@@ -133,7 +137,7 @@ docker compose -f ./docker/prod.docker-compose.yml --env-file .env.prod up -d --
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `SECRET_KEY` | random | **YES** | Flask session secret — set a long random string |
+| `SECRET_KEY` | none | **YES** | Flask session secret. The app **refuses to boot** without one, on the `.env.example` placeholder, or on the empty string Compose substitutes for an unset `${SECRET_KEY}`. A random per-process fallback survives only under `FLASK_DEBUG=true`, because two Gunicorn workers with two different keys log users out at random |
 | `HTTPS` | `false` | no | Set `true` in production (enables Secure cookies + HSTS) |
 | `UPLOAD_FOLDER` | `./uploads` | no | Absolute path for uploaded files |
 | `DATABASE_URL` | `sqlite:///pixelvault.db` | no | SQLAlchemy URI (4 slashes for absolute paths) |
@@ -240,7 +244,23 @@ Each `Album` has two tokens:
 - `token` → `/share/<token>` — upload link (guests can browse & upload)
 - `view_token` → `/view/<view_token>` — view-only link (browse only)
 
-Both links respect the album-level `allow_upload` toggle.
+**A token names an album; it does not authorize anything.** Opening the album page while
+signed in *mints* an `AlbumAccess` grant whose `access_type` records which of the two links
+was followed, and every later request — media, photo index, ZIP, upload — is judged against
+that grant by `may_read_album` / `may_upload_to` in
+[routes/share.py](src/pixelvault/routes/share.py). The other route modules import those two
+helpers rather than re-deriving the rule.
+
+That indirection is the fix for a family of bugs where the token *was* the capability: a
+view-only recipient could read the upload token out of their own (signed, but not encrypted)
+session cookie and upload with it; an owner downgrading a guest to view-only revoked nothing,
+because no upload endpoint consulted `access_type`; and an unauthenticated caller holding one
+media URL was promoted into album-wide access by the media route itself. Nothing writes a
+capability into the session now. Following the upload link also cannot *upgrade* an existing
+`view` grant, or a downgraded guest could simply re-grant themselves.
+
+Both links still respect the album-level `allow_upload` toggle, which is checked before the
+per-guest grant so a closed album says so rather than implying the guest lacks access.
 
 ### CSRF Protection
 `CSRFProtect(app)` in [__init__.py](src/pixelvault/__init__.py) guards **every** POST, PUT,
@@ -350,9 +370,16 @@ extension upgrade could reverse it silently.
   third-party address. Copy-link is exempt because it sends nothing.
 - Invite links are built from `PUBLIC_BASE_URL`, never from the request's `Host`.
 - Accepting an invite while already signed in is refused, not silently merged.
-- Sessions use `HttpOnly=True`, `SameSite=Lax`, and `Secure=True` when `HTTPS=true`.
+- **Both** auth cookies carry `HttpOnly`, `SameSite=Lax`, and `Secure` when `HTTPS=true`.
+  Flask-Login's `remember_token` is a second, independent authenticator — it rebuilds a full
+  session on its own — and its library defaults ship with neither `Secure` nor `SameSite`,
+  which made it both a cleartext credential on any `http://` request and a way around the
+  session cookie's `SameSite`. It is capped at 30 days rather than Flask-Login's 365, and
+  invite acceptance no longer mints one (nobody asked for it on that form).
 - Security headers set on every response: `X-Frame-Options`, `X-Content-Type-Options`, HSTS.
-- bcrypt uses 600,000 rounds — password operations are intentionally slow.
+- Passwords use PBKDF2-SHA256 at 600,000 rounds (`User.set_password`) — deliberately slow.
+  `/login` verifies a dummy hash when the username is unknown, so both branches cost the
+  same and response time does not reveal whether an account exists.
 - `ProxyFix` is wrapped around the WSGI app with `x_for=TRUSTED_PROXY_COUNT`. **Never set that
   higher than the real number of proxies appending to `X-Forwarded-For`** — a client's own header
   then survives into the trusted region and it can pick its own rate-limit identity.
@@ -405,7 +432,8 @@ extension upgrade could reverse it silently.
 | `test_invite_admin.py` | The panel's four actions, the issue-commit-then-send order, and what each failure flashes |
 | `test_invite_access.py` | **The email cannot be overridden via the form**; bad/expired/replayed tokens; accepting while signed in; `/register` is gone; rate limits |
 | `test_album_download.py` | Archive contents and duplicate-name suffixing; that peak memory does not scale with album size; that the staging file and its descriptor never leak; the per-user download budget |
-
+| `test_share_access.py` | The grant model: a view-only link never yields upload rights, a downgrade takes them away, and neither a bare token nor an account alone reaches an album |
+| `test_session_security.py` | Raw `Set-Cookie` flags on both auth cookies, the login timing equaliser, and every `SECRET_KEY` value the boot check refuses |
 | `test_csrf.py` | The **only** module that runs with CSRF on. Each caller class refused without a token and accepted with one; the url_map sweep that covers routes not yet written; the templates scanned for a POST form missing its field |
 
 `conftest.py` sets the environment before importing the app, because `config.py` reads
@@ -413,6 +441,12 @@ env vars at module import time — which is why the invite TTL and resend cooldo
 there and not inside a test. A `mailer` fixture swaps a `MemoryMailer` into
 `app.extensions['mailer']`, so every test asserts on what *would* have been sent, with no
 network and no monkeypatched module globals.
+
+The shared `app` fixture sets `WTF_CSRF_ENABLED = False`, so ordinary tests post forms without
+a token; `test_csrf.py` flips that key back on per test and is the only module that exercises
+the real thing. A test whose subject is a *guest* must mint an `AlbumAccess` grant with the
+`grant_access` fixture — holding the share token is deliberately not enough any more, and a
+test that leaned on it would stop describing the app.
 
 The shared `app` fixture also sets **`WTF_CSRF_ENABLED = False`**. No test outside
 `test_csrf.py` is about CSRF, and every one of them posts without a browser having rendered a
@@ -422,8 +456,9 @@ they were testing. It is a config flag rather than an unregistered extension pre
 real endpoints through the real hook. It flips a flag rather than building a second app
 because `create_app()` re-registers every route on the module-level limiter singleton.
 
-Coverage is upload- and invite-focused; the rest of the app is still verified manually via the
-Docker test container. See [#25](https://github.com/gfvandehei/PixelVault/issues/25).
+Coverage is upload-, invite- and access-control-focused. Album browsing, the dashboard
+filters and the admin panel's rendering are still verified manually via the Docker test
+container. See [#25](https://github.com/gfvandehei/PixelVault/issues/25).
 
 ---
 
