@@ -42,5 +42,12 @@ services:
       - ${PIXELVAULT_ROOT:?set the root}/app.py:/app/app.py
       - ${DATA_DIRECTORY:?set the data directory}:/app/instance
       - ${UPLOAD_FOLDER:?set the upload directory}:/app/uploads
+    # Loopback only, like prod (#42) — and this container has more to lose by
+    # being reachable: the SECRET_KEY above is committed to the repository, the
+    # seeded admin is admin@test.com / password, and FLASK_DEBUG=true renders
+    # tracebacks. It is a localhost tool by construction — PUBLIC_BASE_URL is
+    # http://localhost:5050 and invite links built from it only resolve here — so
+    # binding it to 0.0.0.0 offers the whole LAN an admin account and nobody a
+    # working link.
     ports:
-      - 5050:5050
+      - "127.0.0.1:5050:5050"

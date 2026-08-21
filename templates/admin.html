@@ -296,6 +296,7 @@
       <div class="section-title">Invitations</div>
 
       <form method="POST" action="{{ url_for('admin_add_email') }}" class="add-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-group" style="margin-bottom:0;">
           <label for="new-email">Invite Email Address</label>
           <div class="add-form-row">
@@ -386,17 +387,20 @@
                 {#- One route, two labels: a LEGACY row (and any invite that was
                     never emailed) has nothing to *re*-send. -#}
                 <form method="POST" action="{{ url_for('admin_resend_invite', entry_id=entry.id) }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button type="submit" class="btn btn-ghost btn-sm">
                     {{ 'Resend' if entry.last_sent_at else 'Send invite' }}
                   </button>
                 </form>
                 <form method="POST" action="{{ url_for('admin_invite_link', entry_id=entry.id) }}"
                       onsubmit="return confirm('Generate a new invite link for {{ entry.email }}? Any link already sent stops working immediately, and the new one is shown only once.')">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button type="submit" class="btn btn-ghost btn-sm">Copy link</button>
                 </form>
               {% endif %}
               <form method="POST" action="{{ url_for('admin_remove_email', entry_id=entry.id) }}"
                     onsubmit="return confirm({% if state == 'accepted' %}'Remove the invite record for {{ entry.email }}? Their account, albums and photos are not touched — only this record goes.'{% else %}'Revoke the invitation for {{ entry.email }}? Any link already sent stops working immediately and they will no longer be able to register.'{% endif %})">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn btn-danger btn-sm">Remove</button>
               </form>
             </div>
@@ -524,6 +528,7 @@
               <form method="POST" action="{{ url_for('admin_delete_album', album_id=album.id) }}"
                     onsubmit="return confirm('Permanently delete album &quot;{{ album.name | replace('&quot;', '') }}&quot; and all its files? This cannot be undone.')"
                     onclick="event.stopPropagation()">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button type="submit" class="btn btn-danger btn-sm" style="width:100%;">Delete</button>
               </form>
             </div>

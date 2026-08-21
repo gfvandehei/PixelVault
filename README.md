@@ -95,9 +95,12 @@ the copy-link fallback, and what to do when mail does not arrive.
 
 > **Which nginx?** `conf/nginx.conf` configures the `nginx` service in
 > `docker/prod.docker-compose.yml`, which is gated behind `profiles: [nginx]` and does **not** start
-> unless you run `--profile nginx`. If you instead terminate TLS on a separate reverse proxy and
-> point it at the published `5000`, that proxy's config is the one that matters — see
-> [#28](https://github.com/gfvandehei/PixelVault/issues/28) and
+> unless you run `--profile nginx`. If you instead terminate TLS on a separate reverse proxy, point
+> it at `http://127.0.0.1:5000` — the app container publishes its port on loopback only, so that
+> proxy must run on the same host and its config is the one that matters — see
+> [#28](https://github.com/gfvandehei/PixelVault/issues/28),
+> [docs/configuration.md §6](docs/configuration.md#6-reverse-proxy) for why the origin is closed and
+> what `TRUSTED_PROXY_COUNT` has to be, and
 > [docs/upload_operations.md](docs/upload_operations.md), which maps every limit an upload passes
 > through and which hop to blame for each failure.
 
@@ -214,11 +217,13 @@ PixelVault is designed with internet exposure in mind:
 | MIME sniffing | X-Content-Type-Options: nosniff |
 | Spam uploads | Rate limited at 600 uploads/hour on the single-request path; chunked uploads are bounded by per-user session and byte quotas instead |
 | Disk exhaustion via abandoned uploads | Per-user caps on open sessions and in-flight bytes; partials older than the TTL are swept automatically |
-| Rate-limit evasion via spoofed IP | `ProxyFix` trusts exactly `TRUSTED_PROXY_COUNT` proxy hops |
+| Rate-limit evasion via spoofed IP | `ProxyFix` trusts exactly `TRUSTED_PROXY_COUNT` proxy hops, and the origin is published on `127.0.0.1` only, so the proxy chain that count describes cannot be walked around |
 | Unauthorized access | Media files served through Flask auth check, not static |
 
 ### Recommended additional hardening for production:
-- Run behind Nginx (included) — never expose Flask directly
+- Run behind Nginx (included) — never expose Flask directly. The compose file already binds the
+  app's port to `127.0.0.1`; do not widen it. Note that a firewall is not an alternative, since
+  Docker's published-port rules are evaluated before the chain `ufw` writes into
 - Use HTTPS (Let's Encrypt is free)
 - Set `HTTPS=true` in .env
 - Store `uploads/` on a separate volume or object storage

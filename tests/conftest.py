@@ -114,7 +114,7 @@ from pixelvault import create_app  # noqa: E402
 from pixelvault import uploads as uploads_module  # noqa: E402
 from pixelvault.extensions import db, limiter  # noqa: E402
 from pixelvault.mailer import MemoryMailer  # noqa: E402
-from pixelvault.models import Album, Base, Photo, UploadSession, User  # noqa: E402
+from pixelvault.models import Album, AlbumAccess, Base, Photo, UploadSession, User  # noqa: E402
 
 from .protocol import ProtocolClient  # noqa: E402
 
@@ -129,9 +129,23 @@ def app():
     shared module-level ``limiter`` singleton, so building it per test would
     stack duplicate limits on the same endpoints. Isolation comes from
     ``reset_state`` below instead.
+
+    **CSRF is switched off here** (#37). Every state-changing endpoint is
+    protected in production by ``CSRFProtect``, and none of the ~345 tests in the
+    other modules is about that: they post forms and JSON directly, with no
+    browser to have rendered a token first, so leaving it on would turn every one
+    of them into a 400 that says nothing about what it was testing.
+
+    Switching it off *here*, in the shared fixture, rather than per test, is what
+    keeps that decision in one greppable place — and it is a config flag rather
+    than an unregistered extension so the protection is still wired up, still
+    reachable, and can be turned back on for the tests that are about it.
+    ``tests/test_csrf.py`` flips this same key to ``True`` for the duration of a
+    test and drives the real endpoints through it. It has to do it that way and
+    not by building a second app, for the limiter reason above.
     """
     application = create_app()
-    application.config.update(TESTING=True)
+    application.config.update(TESTING=True, WTF_CSRF_ENABLED=False)
     yield application
     shutil.rmtree(TEST_TMP, ignore_errors=True)
 
@@ -256,6 +270,44 @@ def album(app, user):
         db.session.add(row)
         db.session.commit()
         return Ref(id=row.id, token=row.token, view_token=row.view_token, name=row.name)
+
+
+@pytest.fixture
+def grant_access(app):
+    """Return a callable minting (or re-typing) a guest's ``AlbumAccess`` grant.
+
+    The grant is what authorises a non-owner — reads *and* writes — so a test whose
+    subject is a guest has to give them one, exactly as opening ``/album/<token>``
+    would in a browser. Holding the share token is not a substitute: that is the
+    property #38 turns on, and a test that leaned on it would stop describing the
+    app.
+
+    Idempotent, so a test can mint a grant and then downgrade it the way the owner's
+    access panel does.
+    """
+    def _grant(album_id, user_id, access_type="upload"):
+        with app.app_context():
+            row = db.session.query(AlbumAccess).filter_by(
+                user_id=user_id, album_id=album_id).first()
+            if row is None:
+                row = AlbumAccess(user_id=user_id, album_id=album_id)
+                db.session.add(row)
+            row.access_type = access_type
+            db.session.commit()
+            return Ref(id=row.id, user_id=user_id, album_id=album_id,
+                       access_type=row.access_type)
+    return _grant
+
+
+@pytest.fixture
+def access_type(app):
+    """Return a callable reading back a guest's stored ``access_type``, or None."""
+    def _read(album_id, user_id):
+        with app.app_context():
+            row = db.session.query(AlbumAccess).filter_by(
+                user_id=user_id, album_id=album_id).first()
+            return None if row is None else row.access_type
+    return _read
 
 
 # ── Clients ────────────────────────────────────────────────────────────────

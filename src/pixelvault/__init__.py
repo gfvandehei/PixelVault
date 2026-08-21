@@ -1,12 +1,18 @@
 import os
 import uuid
+from datetime import timedelta
 from pathlib import Path
 
-from flask import Flask, render_template
+from flask import Flask, jsonify, render_template
+from flask_wtf.csrf import CSRFError, CSRFProtect
 from werkzeug.middleware.proxy_fix import ProxyFix
 import sys
 
 from .extensions import db, login_manager, limiter
+# Private, and deliberately shared rather than reimplemented: the CSRF error
+# handler below has to decide "browser or program?" exactly as the unauthorized
+# handler does, and two copies of that judgement would drift.
+from .extensions import _wants_json
 # Aliased deliberately. Importing the `pixelvault.mailer` *module* — which
 # extensions does, to build a backend — binds it as an attribute of this package,
 # and a package's attributes are this file's globals. An unaliased `mailer` proxy
@@ -26,6 +32,12 @@ def create_app():
     route modules, attaches security headers to every response, sets up error handlers,
     and runs any pending database migrations before returning the ready app instance.
     """
+    # Before anything else. Everything below this line — the database, the
+    # migrations, the seeded admin — is work done on behalf of an app whose
+    # sessions may be unsignable or forgeable, and the cheapest moment to say so
+    # is the first one.
+    _validate_secret_key()
+
     app = Flask(
         __name__,
         template_folder=str(TEMPLATES_FOLDER.absolute()),
@@ -59,15 +71,52 @@ def create_app():
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
-    # Flask-Login's remember cookie is configured separately from Flask's session
-    # cookie and defaults to no SameSite attribute at all. The app has no CSRF
-    # tokens, so SameSite is what stands between a cross-site POST and an
-    # authenticated one — leaving one of the two cookies without it would let a
-    # remembered login supply the identity the session cookie refused to
-    # (docs/account_page_design.md §7).
+    # ── "Remember me" cookie ───────────────────────────────────────────────
+    # (#34 set the same three flags independently, for the CSRF reason below;
+    # this block supersedes it and adds the lifetime cap.)
+    # Flask-Login's remember_token is a second, independent authenticator: given
+    # one, Flask-Login rebuilds a full session from it with no session cookie
+    # present at all. It therefore needs *at least* everything the session cookie
+    # above has, and its defaults ship with none of it
+    # (REMEMBER_COOKIE_SECURE=False, REMEMBER_COOKIE_SAMESITE=None).
+    #
+    # Both flags are load-bearing for a different reason:
+    #
+    # * Without Secure, a single http:// request — a typed address, an old
+    #   bookmark, a link in an email — puts a year-long credential on the wire in
+    #   cleartext before the redirect to https:// happens. HSTS does not help: it
+    #   only arrives on an HTTPS response, so a browser that has not been here
+    #   over TLS yet has nothing pinned.
+    # * Without SameSite, browsers that do not default to Lax send it on
+    #   cross-site POSTs. Since it authenticates on its own, the session cookie's
+    #   SameSite=Lax buys nothing — a cross-site form post carrying only this
+    #   cookie was enough to delete an album (#36).
+    #
+    # Secure tracks SESSION_COOKIE_SECURE rather than being hard-coded, so HTTPS
+    # is the one switch that governs both; hard-coding True would silently break
+    # "remember me" on a plain-HTTP deployment instead of hardening it.
     app.config['REMEMBER_COOKIE_HTTPONLY'] = True
     app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
     app.config['REMEMBER_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
+    # Flask-Login's default is 365 days. A bearer token that survives a year
+    # outlives the laptop it was issued to; 30 days matches
+    # PERMANENT_SESSION_LIFETIME above so the two halves of "still signed in"
+    # expire together.
+    app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=30)
+
+    # ── CSRF (#37) ─────────────────────────────────────────────────────────
+    # No expiry on the token itself. Flask-WTF's default is one hour, which is
+    # shorter than a single legitimate action here: a 470 MB video is ~59 chunk
+    # requests over a slow uplink, and the upload page is routinely left open
+    # while a batch runs. An hour-old token would start failing chunks mid-file
+    # with a 400 that looks exactly like corruption, and the user's only recovery
+    # would be a reload — which is the one thing that loses the in-page queue.
+    #
+    # The token is not thereby unbounded: it is derived from a per-session secret
+    # in the signed cookie, so it dies with the session (PERMANENT_SESSION_LIFETIME
+    # above) and with any logout. Dropping the time limit trades a second,
+    # weaker clock for the session's own, rather than removing a clock.
+    app.config['WTF_CSRF_TIME_LIMIT'] = None
 
     # The upload caps come from independent env vars that have to agree, and a
     # disagreement is otherwise invisible: the operator sees uploads refused at init
@@ -85,6 +134,13 @@ def create_app():
     login_manager.init_app(app)
     limiter.init_app(app)
     mailer_ext.init_app(app)
+    # Constructed per app rather than as a module-level singleton like db /
+    # login_manager / limiter: nothing outside create_app needs a handle on it.
+    # CSRF is enforced by a before_request hook covering *every* POST/PUT/PATCH/
+    # DELETE view at once, which is the point — a route added later is protected
+    # by default instead of by remembering a decorator. See tests/test_csrf.py,
+    # which asserts exactly that of the live url_map.
+    CSRFProtect(app)
     # ── Routes ─────────────────────────────────────────────────────────────
     # Import after extensions are bound so decorators resolve correctly
     from .routes import register_all
@@ -124,6 +180,27 @@ def create_app():
         """Render a friendly 429 page when a client exceeds a rate limit."""
         return render_template('error.html', code=429, message="Too many requests. Please slow down."), 429
 
+    @app.errorhandler(CSRFError)
+    def csrf_failed(e):
+        """Answer a rejected CSRF check in the dialect the caller asked in.
+
+        The same reasoning as ``handle_unauthorized`` in extensions.py: uploader.js
+        parses every response as JSON and reads ``body.error``, so handing it an
+        HTML page produces the generic "Upload failed (HTTP 400)" and hides the one
+        instruction that fixes this — reload the page. A stale token is in fact the
+        likeliest way an upload meets this handler, because the tab that started the
+        batch may have been open across a logout in another tab.
+
+        Left at Flask-WTF's 400 rather than promoted to 403. A 403 here would be
+        indistinguishable from ``allow_upload`` having been revoked, which
+        uploader.js reports as "Uploads are disabled for this album" — a wrong and
+        unactionable message for a token problem.
+        """
+        message = 'Security token missing or expired — reload the page and try again.'
+        if _wants_json():
+            return jsonify({'error': message}), 400
+        return render_template('error.html', code=400, message=message), 400
+
     # ── CLI commands ───────────────────────────────────────────────────────
     @app.cli.command('create-admin')
     def create_admin_command():
@@ -150,6 +227,36 @@ def create_app():
         _run_migrations()
 
     return app
+
+
+def _validate_secret_key():
+    """Refuse to boot on a session secret that cannot sign a cookie safely.
+
+    The same shape of decision as :func:`_validate_mail_config` below — a
+    configuration fault that is invisible until it matters, made loud at deploy
+    time instead — and the opposite of the ``validate_upload_limits()`` loop in
+    ``create_app()``, which reports the same ``(severity, message)`` pairs and
+    never stops the app. ``check_secret_key()`` in ``config.py`` carries the
+    argument for why these particular faults have no degraded mode worth having:
+    the two error cases are outages whose symptom (random logouts, blanket 500s)
+    points nowhere near the cause, and the third is a working key published in a
+    public repository, which is an authentication bypass that produces no symptom
+    at all.
+
+    Only the first error is raised. They are mutually exclusive today, and
+    reporting one cause per crash keeps the message a container operator sees in
+    ``docker logs`` down to the single thing they have to change.
+
+    Logs through ``logging.getLogger(__name__)`` rather than ``app.logger``
+    because this runs before the ``Flask`` object exists. The two are the same
+    logger anyway — Flask names its logger after the app's import name, which for
+    this package is exactly ``__name__``.
+    """
+    logger = logging.getLogger(__name__)
+    for severity, message in check_secret_key():
+        if severity == 'error':
+            raise RuntimeError(message)
+        logger.warning('SECRET_KEY advisory: %s', message)
 
 
 def _validate_mail_config():

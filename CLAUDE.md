@@ -14,7 +14,8 @@ Accounts exist only by invitation: an admin adds an address, the app emails a si
 |---|---|
 | Backend | Flask 3.1+, SQLAlchemy ORM, Flask-Login, Flask-Limiter |
 | Database | SQLite (via SQLAlchemy) |
-| Auth | Flask-Login + bcrypt (600k rounds) |
+| Auth | Flask-Login + PBKDF2-SHA256 (600k rounds), Flask-WTF CSRF |
+| CSRF | Flask-WTF `CSRFProtect` — app-wide, no forms library involved |
 | Image Processing | Pillow, pillow-heif (HEIC support) |
 | File Validation | python-magic (MIME type verification) |
 | Frontend | Jinja2 templates + vanilla JS |
@@ -67,6 +68,10 @@ pixelvault/
 │   ├── Dockerfile.dev              # Dev image with hot reload
 │   ├── prod.docker-compose.yml     # App + Nginx
 │   └── test.docker-compose.yml     # Test container (port 5050, pre-seeded admin)
+├── .github/
+│   ├── workflows/dependency-audit.yml  # uv lock --check, pip-audit, floor check
+│   ├── scripts/check_floors.py     # requirements.txt floors must not sit below uv.lock
+│   └── dependabot.yml              # uv + docker + github-actions
 ├── scripts/
 │   ├── create_admin.py             # Standalone admin creation (no Flask CLI needed)
 │   ├── migrate_heic.py             # Convert stored HEIC files to JPEG
@@ -134,7 +139,7 @@ docker compose -f ./docker/prod.docker-compose.yml --env-file .env.prod up -d --
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `SECRET_KEY` | random | **YES** | Flask session secret — set a long random string |
+| `SECRET_KEY` | none | **YES** | Flask session secret. The app **refuses to boot** without one, on the `.env.example` placeholder, or on the empty string Compose substitutes for an unset `${SECRET_KEY}`. A random per-process fallback survives only under `FLASK_DEBUG=true`, because two Gunicorn workers with two different keys log users out at random |
 | `HTTPS` | `false` | no | Set `true` in production (enables Secure cookies + HSTS) |
 | `UPLOAD_FOLDER` | `./uploads` | no | Absolute path for uploaded files |
 | `DATABASE_URL` | `sqlite:///pixelvault.db` | no | SQLAlchemy URI (4 slashes for absolute paths) |
@@ -268,7 +273,61 @@ Each `Album` has two tokens:
 - `token` → `/share/<token>` — upload link (guests can browse & upload)
 - `view_token` → `/view/<view_token>` — view-only link (browse only)
 
-Both links respect the album-level `allow_upload` toggle.
+**A token names an album; it does not authorize anything.** Opening the album page while
+signed in *mints* an `AlbumAccess` grant whose `access_type` records which of the two links
+was followed, and every later request — media, photo index, ZIP, upload — is judged against
+that grant by `may_read_album` / `may_upload_to` in
+[routes/share.py](src/pixelvault/routes/share.py). The other route modules import those two
+helpers rather than re-deriving the rule.
+
+That indirection is the fix for a family of bugs where the token *was* the capability: a
+view-only recipient could read the upload token out of their own (signed, but not encrypted)
+session cookie and upload with it; an owner downgrading a guest to view-only revoked nothing,
+because no upload endpoint consulted `access_type`; and an unauthenticated caller holding one
+media URL was promoted into album-wide access by the media route itself. Nothing writes a
+capability into the session now. Following the upload link also cannot *upgrade* an existing
+`view` grant, or a downgraded guest could simply re-grant themselves.
+
+Both links still respect the album-level `allow_upload` toggle, which is checked before the
+per-guest grant so a closed album says so rather than implying the guest lacks access.
+
+### CSRF Protection
+`CSRFProtect(app)` in [__init__.py](src/pixelvault/__init__.py) guards **every** POST, PUT,
+PATCH and DELETE in the app. It is a `before_request` hook, not a per-view decorator, and
+that is the whole design: a route added next year is protected because nobody had to
+remember anything. `tests/test_csrf.py` asserts that of the live `url_map`, so the day
+someone reaches for `@csrf.exempt` a test fails instead of a hole opening quietly.
+
+Nothing here uses WTForms. Flask-WTF is pulled in for `CSRFProtect` alone — forms stay
+hand-written Jinja, and `csrf_token()` is the only thing the templates gain.
+
+Four kinds of caller, three ways to carry the token:
+
+| Caller | How the token travels |
+|---|---|
+| Browser form POST | `<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">` |
+| In-page `fetch` (delete photo) | `X-CSRFToken` header, read from the meta tag |
+| Chunk upload (`application/octet-stream`) | `X-CSRFToken` header — the body is raw bytes, so there is no field to use |
+| Fire-and-forget `DELETE` (`upload/cancel`) | `X-CSRFToken` header |
+
+Load-bearing details:
+
+- **The token is rendered once per page** as `<meta name="csrf-token">` in
+  [base.html](templates/base.html), and `uploader.js` re-reads that tag *per request*
+  rather than capturing it at construction. An uploader built at page load may still be
+  running an hour later.
+- **`WTF_CSRF_TIME_LIMIT = None`.** Flask-WTF's one-hour default is shorter than a single
+  legitimate action here — a 470 MB video is ~59 requests — and a token expiring mid-file
+  fails chunks with a `400` indistinguishable from corruption. The token still dies with
+  the session, so this swaps a second weaker clock for the session's own rather than
+  removing a clock.
+- **A rejected token answers in the caller's dialect**, JSON for XHR and the error page for
+  a browser, for the same reason `handle_unauthorized` does: uploader.js reads `body.error`,
+  and an HTML page reaches it as the useless "Upload failed (HTTP 400)".
+- **`400`, not `403`.** A `403` from an upload endpoint is already spoken for — uploader.js
+  reports it as "Uploads are disabled for this album".
+- The wire contract for the upload endpoints is
+  [docs/upload_protocol.md §6.0](docs/upload_protocol.md); `tests/protocol.py` mirrors it.
 
 ### Rate Limits (Flask-Limiter)
 | Endpoint | Limit |
@@ -279,6 +338,7 @@ Both links respect the album-level `allow_upload` toggle.
 | Invite submit (`POST /invite`) | 20/hour (per IP) |
 | Upload (legacy single-request) | 600/hour |
 | Album create | 30/hour |
+| Album ZIP download (owner / share / view — one bucket each) | 10/hour |
 | Password change (`POST /account/password`) | 10/hour (per user) |
 | Admin email add (issues + sends an invite) | 60/hour |
 | Admin invite resend | 30/hour |
@@ -295,10 +355,38 @@ charged so no status is a free 8 MiB sink. It has to be that generous because
 Flask-Limiter checks the limit on entry even when it does not deduct — a small budget
 spent on failures would start rejecting the good chunks too.
 
+The album-download budget is sized the other way round — for *cost per call*, not for
+volume. One call reads the whole album off the media volume, DEFLATEs it, stages the
+archive back onto that same volume and streams it out, so ten an hour is already more
+archives than any human clicking a link produces, while leaving room for the
+phone-on-hotel-wifi case where a multi-gigabyte transfer dies and gets retried.
+`rate_limit_key` resolves an authenticated caller to `user:<id>`, so this is a real
+per-account budget rather than a bucket shared by everyone behind one NAT. The number
+lives in `ALBUM_ZIP_RATE_LIMIT` in [utils.py](src/pixelvault/utils.py), next to the
+cost it bounds.
+
+**A CSRF rejection is the one refusal that is *not* charged.** It aborts before the
+limiter's deferred deduction sees a response, and that is the right way round twice over:
+it never reads the 8 MiB body the budget protects, so it is cheaper than the `409` beside
+it; and its likeliest cause is a page left open across a logout, where charging would keep
+the user locked out for an hour *after* the reload that fixed the problem. A refusal whose
+remedy is "reload" must not outlive the reload. Pinned by `tests/test_csrf.py`, because an
+extension upgrade could reverse it silently.
+
 ---
 
 ## Security Notes
 
+- **Every state-changing request carries a CSRF token** — `CSRFProtect` checks every POST,
+  PUT, PATCH and DELETE in a `before_request` hook, so a new route is protected by default
+  rather than by remembering a decorator. Forms carry a hidden `csrf_token` field; the XHR
+  and `fetch` callers send `X-CSRFToken`. Before this, `SESSION_COOKIE_SAMESITE = 'Lax'` was
+  the only thing between a cross-site POST and album deletion — a single point of failure,
+  and one already defeated by a `remember_token` cookie that authenticates on its own.
+  `SameSite` remains as defence in depth; it is no longer the defence.
+- The check runs **before** `@login_required` and before the view, so a forged request never
+  reaches a database session — the album, the photo and the invite are still there
+  afterwards, which is what `tests/test_csrf.py` asserts rather than merely asserting a 400.
 - Registration is **invite-only and link-only**: there is no `/register`. An admin issues an
   invite, the app emails a single-use TTL-bounded link, and accepting it is the only way an
   account is created.
@@ -312,17 +400,25 @@ spent on failures would start rejecting the good chunks too.
   third-party address. Copy-link is exempt because it sends nothing.
 - Invite links are built from `PUBLIC_BASE_URL`, never from the request's `Host`.
 - Accepting an invite while already signed in is refused, not silently merged.
+- **Both** auth cookies carry `HttpOnly`, `SameSite=Lax`, and `Secure` when `HTTPS=true`.
+  Flask-Login's `remember_token` is a second, independent authenticator — it rebuilds a full
+  session on its own — and its library defaults ship with neither `Secure` nor `SameSite`,
+  which made it both a cleartext credential on any `http://` request and a way around the
+  session cookie's `SameSite`. It is capped at 30 days rather than Flask-Login's 365, and
+  invite acceptance no longer mints one (nobody asked for it on that form).
 - Changing a password **rotates `user.session_token`**, which invalidates every session and
   remember-me cookie that account holds — on every device — because both carry that token. The
   browser making the change is re-issued a session immediately; every other one is gone. A
   *failed* attempt rotates nothing, so the form cannot be used as a logout button by whoever
   can reach it.
-- The change-password form requires the current password. That, plus `SameSite=Lax` on both the
-  session and remember-me cookies, is what stands in for the CSRF tokens the app does not have.
-- Sessions use `HttpOnly=True`, `SameSite=Lax`, and `Secure=True` when `HTTPS=true`. The
-  Flask-Login remember cookie is configured to match — it defaults to *no* `SameSite` at all.
+- The change-password form requires the current password. That is re-authentication, not CSRF
+  defence: since #37 every state-changing request in the app carries a CSRF token, so the
+  current-password field is now defence in depth rather than the thing standing in for one.
+  `SameSite=Lax` is likewise no longer load-bearing on its own.
 - Security headers set on every response: `X-Frame-Options`, `X-Content-Type-Options`, HSTS.
-- bcrypt uses 600,000 rounds — password operations are intentionally slow.
+- Passwords use PBKDF2-SHA256 at 600,000 rounds (`User.set_password`) — deliberately slow.
+  `/login` verifies a dummy hash when the username is unknown, so both branches cost the
+  same and response time does not reveal whether an account exists.
 - `ProxyFix` is wrapped around the WSGI app with `x_for=TRUSTED_PROXY_COUNT`. **Never set that
   higher than the real number of proxies appending to `X-Forwarded-For`** — a client's own header
   then survives into the trusted region and it can pick its own rate-limit identity.
@@ -375,6 +471,10 @@ spent on failures would start rejecting the good chunks too.
 | `test_invite_admin.py` | The panel's four actions, the issue-commit-then-send order, and what each failure flashes |
 | `test_account.py` | Password change end to end: other sessions evicted, the caller's kept, a failed attempt evicting nobody, the four validation rules, the notice email, and a relay failure not undoing the change |
 | `test_invite_access.py` | **The email cannot be overridden via the form**; bad/expired/replayed tokens; accepting while signed in; `/register` is gone; rate limits |
+| `test_album_download.py` | Archive contents and duplicate-name suffixing; that peak memory does not scale with album size; that the staging file and its descriptor never leak; the per-user download budget |
+| `test_share_access.py` | The grant model: a view-only link never yields upload rights, a downgrade takes them away, and neither a bare token nor an account alone reaches an album |
+| `test_session_security.py` | Raw `Set-Cookie` flags on both auth cookies, the login timing equaliser, and every `SECRET_KEY` value the boot check refuses |
+| `test_csrf.py` | The **only** module that runs with CSRF on. Each caller class refused without a token and accepted with one; the url_map sweep that covers routes not yet written; the templates scanned for a POST form missing its field |
 
 `conftest.py` sets the environment before importing the app, because `config.py` reads
 env vars at module import time — which is why the invite TTL and resend cooldown are chosen
@@ -382,8 +482,23 @@ there and not inside a test. A `mailer` fixture swaps a `MemoryMailer` into
 `app.extensions['mailer']`, so every test asserts on what *would* have been sent, with no
 network and no monkeypatched module globals.
 
-Coverage is upload- and invite-focused; the rest of the app is still verified manually via the
-Docker test container. See [#25](https://github.com/gfvandehei/PixelVault/issues/25).
+The shared `app` fixture sets `WTF_CSRF_ENABLED = False`, so ordinary tests post forms without
+a token; `test_csrf.py` flips that key back on per test and is the only module that exercises
+the real thing. A test whose subject is a *guest* must mint an `AlbumAccess` grant with the
+`grant_access` fixture — holding the share token is deliberately not enough any more, and a
+test that leaned on it would stop describing the app.
+
+The shared `app` fixture also sets **`WTF_CSRF_ENABLED = False`**. No test outside
+`test_csrf.py` is about CSRF, and every one of them posts without a browser having rendered a
+token first — leaving it on would turn all of them into a 400 that says nothing about what
+they were testing. It is a config flag rather than an unregistered extension precisely so
+`test_csrf.py` can flip that same key back to `True` for the duration of a test and drive the
+real endpoints through the real hook. It flips a flag rather than building a second app
+because `create_app()` re-registers every route on the module-level limiter singleton.
+
+Coverage is upload-, invite- and access-control-focused. Album browsing, the dashboard
+filters and the admin panel's rendering are still verified manually via the Docker test
+container. See [#25](https://github.com/gfvandehei/PixelVault/issues/25).
 
 ---
 

@@ -42,21 +42,35 @@ The app validates the mail settings at boot and refuses to start on an incoheren
 
 | Variable | Default | Required |
 |---|---|---|
-| `SECRET_KEY` | random per process | **yes, in production** |
+| `SECRET_KEY` | none — the app refuses to boot | **yes** |
 | `HTTPS` | `false` | no |
 | `FLASK_DEBUG` | `false` | no |
 | `PORT` | `5000` | no |
 | `ENV_FILE` | — | no |
 
-**`SECRET_KEY`** — signs the session cookie. The default is `os.urandom(32).hex()`, generated
-fresh on every process start, which means: with two Gunicorn workers, each worker signs with a
-*different* key, so a logged-in user is randomly logged out depending on which worker answers, and
-every restart logs everyone out. Set it. A leaked key is worse than a rotating one — anyone holding
-it can forge a session cookie for any user, including an admin, without touching a password.
-Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`.
+**`SECRET_KEY`** — signs the session cookie. **The app refuses to start without one**, and also
+refuses the `change-me-to-a-long-random-string` placeholder from `.env.example`. Generate with
+`python3 -c "import secrets; print(secrets.token_hex(32))"`.
+
+Checked at boot because all three ways of getting it wrong fail invisibly. Left unset, the old
+`os.urandom(32).hex()` default was minted per *process*, so with two Gunicorn workers each signed
+with a different key and a logged-in user was randomly logged out depending on which worker
+answered — with nothing in the logs. Set but empty — which is what `docker compose` substitutes for
+a `${SECRET_KEY}` missing from `.env.prod` — makes Flask raise on every request that writes a
+session, so login, flashes and invites all 500. Left at the placeholder, it is a real working key
+that is also published in this repository: anyone who has read it can forge a session cookie for
+any user, including an admin, without touching a password.
+
+A key shorter than 32 characters is logged as a warning rather than refused — weak, but it still
+signs consistently across workers, so a running deployment is told rather than taken down.
+
+`FLASK_DEBUG=true` is the one exemption, and only for the *unset* case: a dev checkout boots on a
+throwaway key with a warning, because one process means one key and the only cost is that
+restarting logs you out of your own laptop. The placeholder is refused even in debug.
 
 **`HTTPS`** — set `true` when the app is served over TLS. It turns on `Secure` on the session
-cookie and adds an HSTS header. Left `false` behind real HTTPS, the session cookie is willing to
+cookie *and* on Flask-Login's `remember_token` — the latter is a standalone 30-day authenticator,
+so it needs at least what the session cookie has — and adds an HSTS header. Left `false` behind real HTTPS, the session cookie is willing to
 travel over plaintext, so a single downgraded request leaks it. Set `true` on a deployment that is
 *not* fully HTTPS and browsers will discard the cookie entirely — you get an app that cannot hold a
 login, which is the confusing failure this variable produces.
@@ -319,6 +333,64 @@ be bypassed entirely.
 Rate limits on authenticated routes key on user id rather than address (see `rate_limit_key` in
 `extensions.py`), so this matters most for the pre-auth routes: login, and the invite links.
 
+### 6.1 The hop count is only true if the hops cannot be skipped
+
+`TRUSTED_PROXY_COUNT` describes a chain. It says nothing about whether a caller is obliged to
+*use* that chain, and a correct value protects nothing if the app can also be reached directly.
+That was the actual bug in [#42](https://github.com/gfvandehei/PixelVault/issues/42): the value
+was right, and `docker/prod.docker-compose.yml` published the origin on `0.0.0.0:5000`, so a
+caller could go around nginx and hand its own `X-Forwarded-For` straight to `ProxyFix` — which,
+trusting one hop, read it as the client address. The header is not even parsed as an address, so
+`X-Forwarded-For: bucket-0001` is a valid rate-limit identity and the next request can be
+`bucket-0002`. Login's 20/hour, the only brute-force defence in the app (there is no lockout and
+no captcha), stops existing at that point.
+
+The app container now publishes on `127.0.0.1:5000` only. Two things follow that are easy to get
+wrong:
+
+1. **The reverse proxy must run on the same host as the container.** It reaches the app at
+   `http://127.0.0.1:5000`. If your proxy is on a different machine, do not go back to
+   `0.0.0.0` — bind the published port to the specific private interface the proxy connects
+   from (`10.0.0.5:5000:5000`), so the origin is still unreachable from everywhere else.
+2. **A host firewall is not a substitute.** Docker publishes a port with a DNAT rule in
+   iptables' `DOCKER` chain, which is consulted before the `INPUT` chain `ufw` and `firewalld`
+   write into. `ufw deny 5000` on a `0.0.0.0`-published container port denies nothing. This is
+   why the fix is the binding itself and not a firewall rule.
+
+To confirm the origin is closed, from a machine that is not the VPS:
+
+```bash
+curl -sS --max-time 5 http://YOUR_VPS_IP:5000/login   # must fail to connect
+```
+
+and from the VPS itself, that the proxy's upstream is still there:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5000/login   # 200
+```
+
+### 6.2 Recommended: recover the real client IP from Cloudflare
+
+Closing the origin fixes the bypass but leaves the other half of #42 in place. Through the
+intended chain, `x_for=1` makes `ProxyFix` take the entry nginx wrote, which behind Cloudflare is
+**Cloudflare's edge address, not the visitor's**. That is the safe direction — nobody can choose
+it — but every visitor then shares a single rate-limit bucket, so the 20/hour login limit is
+effectively global and one busy visitor locks out everyone else.
+
+The fix belongs in the VPS nginx config, not in the app: have nginx replace `$remote_addr` with
+Cloudflare's `CF-Connecting-IP`, but **only for connections that actually came from Cloudflare** —
+`set_real_ip_from` entries for every published Cloudflare range, refreshed from
+`https://www.cloudflare.com/ips-v4` and `ips-v6`. Trusting the header unconditionally would
+reintroduce exactly the bug this section is about, one layer up: any direct caller could then set
+`CF-Connecting-IP` itself. With `real_ip_header CF-Connecting-IP` and `real_ip_recursive on`,
+nginx's `$proxy_add_x_forwarded_for` starts from the visitor's address and
+`TRUSTED_PROXY_COUNT=1` is the correct value for the app.
+
+Writing that config is tracked in
+[#28](https://github.com/gfvandehei/PixelVault/issues/28), which owns the VPS-side nginx hop.
+`conf/nginx.conf` in this repo is the *bundled container* nginx and is not the file serving
+production — see the note in [upload_operations.md §2](upload_operations.md#note-on-the-nginx-hop).
+
 ---
 
 ## 7. Admin bootstrap
@@ -343,7 +415,7 @@ Registration is invite-only, so these are the only way to create the first accou
 
 | Variable | Default | Section |
 |---|---|---|
-| `SECRET_KEY` | random per process | [Core](#2-core--security) |
+| `SECRET_KEY` | none — the app refuses to boot | [Core](#2-core--security) |
 | `HTTPS` | `false` | [Core](#2-core--security) |
 | `FLASK_DEBUG` | `false` | [Core](#2-core--security) |
 | `PORT` | `5000` | [Core](#2-core--security) |

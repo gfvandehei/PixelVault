@@ -21,7 +21,34 @@ RE_EMAIL = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
 RE_CLIENT_KEY = re.compile(r'^[0-9a-f]{64}$')
 MAX_PASSWORD_LEN = 1024  # prevent slow-hash DoS via huge passwords
 
-SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(32).hex())
+# Whether the Werkzeug debugger is on. Read here as well as in app.py because the
+# session-secret check below treats a dev checkout differently from a deployment,
+# and it needs to know which one it is at import time.
+FLASK_DEBUG = os.environ.get('FLASK_DEBUG', 'false').strip().lower() == 'true'
+
+# The value the operator actually configured, kept separately from the key the
+# app ends up signing with. check_secret_key() has to be able to tell "unset"
+# from "set to a throwaway we generated ourselves", and once SECRET_KEY carries
+# the fallback that distinction is gone.
+_SECRET_KEY_ENV = os.environ.get('SECRET_KEY', '')
+
+#: The value .env.example ships. A deployment still running it is signing sessions
+#: with a key published in a public repository, which is strictly worse than
+#: having no key at all — see check_secret_key().
+SECRET_KEY_PLACEHOLDER = 'change-me-to-a-long-random-string'
+#: Below this many characters a key is reported as weak, but not refused. The
+#: number is `secrets.token_hex(16)`'s output length: shorter than that and the
+#: key is almost certainly a typed word rather than something generated.
+MIN_SECRET_KEY_LENGTH = 32
+
+# The random fallback survives only for FLASK_DEBUG=true. It is genuinely random,
+# so it is not a forgery risk — but it is generated once per *process*, and
+# production runs two Gunicorn workers, so the two sign cookies with different
+# keys and half of every user's requests log them out with nothing in the logs to
+# say why. Outside debug the empty string is left in place deliberately, so
+# _validate_secret_key() in __init__.py refuses to boot instead.
+SECRET_KEY = _SECRET_KEY_ENV or (os.urandom(32).hex() if FLASK_DEBUG else '')
+
 SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', 'sqlite:///pixelvault.db')
 UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER', 'uploads')
 MAX_CONTENT_LENGTH = int(os.environ.get('MAX_UPLOAD_MB', 500)) * 1024 * 1024
@@ -31,6 +58,87 @@ ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip().lower()
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '').strip()
 TEMPLATES_FOLDER = pathlib.Path(os.environ.get("FLASK_TEMPLATES_FOLDER", DEFAULT_ROOT/"templates"))
 STATIC_FOLDER = pathlib.Path(os.environ.get("FLASK_STATIC_FOLDER", DEFAULT_ROOT/"static"))
+
+
+def check_secret_key(configured=None, debug=None):
+    """Return ``[(severity, message)]`` describing what is wrong with ``SECRET_KEY``.
+
+    Pure and parameterised for the same reason as :func:`validate_upload_limits`
+    below — the defaults read the module globals at call time, so a test can pass
+    a value in rather than re-import the package. The decision about what to *do*
+    with each severity belongs to ``_validate_secret_key()`` in ``__init__.py``.
+
+    An ``'error'`` here is fatal, and that is the deliberate difference from
+    :func:`validate_upload_limits`, which reports the same shape and never stops
+    boot. The upload caps have a degraded mode: uploads over some size get
+    refused and everything else works. A session secret has none. Every value
+    this function calls an error produces one of:
+
+    * **unset** — the fallback is minted per process, so with ``--workers 2`` the
+      two workers sign with different keys and a user is logged out on roughly
+      half their requests, with nothing logged anywhere to explain it;
+    * **empty** — ``docker compose`` substitutes an unset ``${SECRET_KEY}`` as
+      ``''``, and because the variable *is* then set, the fallback never fires.
+      Flask raises ``RuntimeError: The session is unavailable...`` on every
+      request that writes a session, so login, flashes and invites all 500;
+    * **the .env.example placeholder** — a real, working key that is also in a
+      public repository. Anyone who has read it can mint a cookie with
+      ``_user_id`` set to the admin's and skip authentication entirely.
+
+    The first two are outages an operator cannot diagnose from the symptom; the
+    third is a full authentication bypass that produces *no* symptom at all. A
+    container that refuses to start names its own cause in one line, which is why
+    all three raise even though a crash loop on deploy is a real cost.
+
+    Length is only a warning. A short key is weak, not broken, and a deployment
+    that has been running one for a year should be told rather than taken down.
+    """
+    configured = _SECRET_KEY_ENV if configured is None else configured
+    debug = FLASK_DEBUG if debug is None else debug
+
+    generate = ('Generate one with: '
+                'python3 -c "import secrets; print(secrets.token_hex(32))"')
+
+    if not configured.strip():
+        if debug:
+            # A dev checkout must still boot. One process, one key, and the only
+            # cost is that restarting logs you out of your own laptop.
+            return [(
+                'warning',
+                'SECRET_KEY is unset; running on a random key generated for this '
+                'process because FLASK_DEBUG=true. Sessions will not survive a '
+                'restart, and with more than one worker they would not survive at '
+                f'all. {generate}'
+            )]
+        return [(
+            'error',
+            'SECRET_KEY is unset or empty, and there is no safe default: a key '
+            'minted per process means each Gunicorn worker signs sessions with a '
+            'different one, and an empty key makes Flask raise on every request '
+            'that touches the session. Note that docker compose substitutes an '
+            f'unset ${{SECRET_KEY}} as the empty string. {generate}'
+        )]
+
+    if configured.strip() == SECRET_KEY_PLACEHOLDER:
+        return [(
+            'error',
+            f'SECRET_KEY is still the .env.example placeholder ({SECRET_KEY_PLACEHOLDER!r}). '
+            'That is a working key which is also published in this repository, so '
+            'anyone who has read it can forge a session cookie for any account, '
+            f'including an admin, without knowing a password. {generate}'
+        )]
+
+    if len(configured.strip()) < MIN_SECRET_KEY_LENGTH:
+        return [(
+            'warning',
+            f'SECRET_KEY is {len(configured.strip())} characters; anything under '
+            f'{MIN_SECRET_KEY_LENGTH} is short enough to be worth guessing offline, '
+            'and a guessed key forges sessions for any account. '
+            f'{generate}'
+        )]
+
+    return []
+
 
 # ── Chunked resumable uploads (docs/upload_protocol.md) ────────────────────
 # Slice size the client is told to use. Sized to sit well under Cloudflare's

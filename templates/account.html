@@ -124,6 +124,7 @@
       session cookie is SameSite=Lax. See docs/account_page_design.md §7.
     #}
     <form method="POST" action="{{ url_for('account_change_password') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="form-group">
         <label for="current_password">Current password</label>
         <input type="password" id="current_password" name="current_password"

@@ -1,10 +1,21 @@
-flask>=3.0.0
-flask-sqlalchemy>=3.1.0
+# Floors, not pins — and they are floors that have to stay at or above the
+# versions in uv.lock, which is what docker/Dockerfile.prod installs. A floor
+# below the lock is not a harmless spread: it is the set of versions a fresh
+# `pip install -r requirements.txt` is *allowed* to resolve to, and it used to
+# admit Pillow 10.0.0 (CVE-2023-50447, code execution via ImageMath.eval),
+# Werkzeug 3.0.0 (CVE-2024-34069, debugger RCE) and gunicorn 21.0 (CVE-2024-1135,
+# request smuggling). Pillow is the one that matters most here: every upload is an
+# attacker-supplied image handed to its decoder. See #45.
+#
+# .github/workflows/dependency-audit.yml fails if any floor drops below the lock.
+flask>=3.1.3
+flask-sqlalchemy>=3.1.1
 flask-login>=0.6.3
-flask-limiter>=3.7.0
-Werkzeug>=3.0.0
-Pillow>=10.0.0
-pillow-heif>=0.13.0
+flask-limiter>=4.1.1
+flask-wtf>=1.3.0
+Werkzeug>=3.1.6
+Pillow>=12.3.0
+pillow-heif>=1.3.0
 python-magic>=0.4.27
-python-dotenv>=1.0.0
-gunicorn>=21.0.0
+python-dotenv>=1.2.2
+gunicorn>=25.1.0

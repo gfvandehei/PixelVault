@@ -43,6 +43,9 @@ All endpoints are `@login_required` and scoped to an album share token.
 The legacy `POST /share/<token>/upload` remains for files under the threshold and is **not
 modified**.
 
+The four state-changing endpoints — everything but `status` — additionally require a CSRF token in
+an `X-CSRFToken` header. See §6.0.
+
 ---
 
 ## 3. Happy path
@@ -141,6 +144,33 @@ final artefact — `complete` renames/processes it rather than concatenating any
 
 ## 6. Request and response shapes
 
+### 6.0 `X-CSRFToken`, on every state-changing request
+
+```
+X-CSRFToken: IjZmMzQ…      // MANDATORY on init, chunk, complete and cancel
+```
+
+`init`, `chunk`, `complete` and `cancel` are all rejected `400` without it. `status` is a `GET` and
+is not checked — see [#37](https://github.com/gfvandehei/PixelVault/issues/37) for why this arrived,
+and `CLAUDE.md` for the app-wide policy it is one instance of.
+
+**A header, not a body field, and that is forced rather than chosen.** A chunk's body is raw
+`application/octet-stream` and `complete` and `cancel` have no body at all, so there is nowhere to
+put a hidden form field; `init` is JSON, where an extra key would mean the *protocol* carried a
+security parameter and every future client had to know to add it. A header keeps the token beside
+`X-Requested-With` where the transport concerns already live, and is what `CSRFProtect` reads by
+default.
+
+The spelling is `X-CSRFToken`. Flask-WTF also accepts `X-CSRF-Token`, but `uploader.js` does not
+send it and neither should anything else — one spelling, so a rename is a single grep.
+
+The token is minted per session and rendered into every page as
+`<meta name="csrf-token" content="…">`. The client re-reads that tag per request rather than
+capturing it at construction, and the server sets `WTF_CSRF_TIME_LIMIT = None` so the token does
+**not** expire on its own clock: a 470 MB upload is ~59 requests over a span that can exceed
+Flask-WTF's one-hour default, and a token expiring mid-file would fail chunks with a `400` that
+looks exactly like corruption. The token still dies with the session.
+
 ### 6.1 `POST /share/<token>/upload/init`
 
 ```jsonc
@@ -200,6 +230,7 @@ Content-Type:    application/octet-stream
 Content-Length:  8388608
 X-Upload-Offset: 251658240      // byte offset this chunk begins at
 X-Chunk-SHA256:  b7e2…          // 64 lowercase hex chars, digest of THIS chunk only. MANDATORY
+X-CSRFToken:     IjZmMzQ…       // MANDATORY, see §6.0
 ```
 
 ```jsonc
@@ -300,6 +331,7 @@ correctly starts a new session rather than resuming into a mismatched prefix.
 | `200` | Chunk accepted / status / complete / cancel | Continue | No |
 | `201` | New session created | Continue | No |
 | `400` | Malformed headers or JSON, or a missing/blank `X-Chunk-SHA256` | Fail permanently | Yes |
+| `400` | Missing or stale `X-CSRFToken` (§6.0) | Reload the page | **No** — see below |
 | `403` | Uploads disabled on the album | Fail permanently | Yes |
 | `404` | Album or session unknown, expired, **or owned by someone else** | Evict mapping, re-init | Yes |
 | `409` | **Offset mismatch** — body carries true `received_bytes`. From `chunk` (wrong offset) or from `complete` (partial is short) | Re-seek, continue | Yes |
@@ -313,6 +345,16 @@ prose: `limit_bytes`, `required_bytes` and `inflight_bytes` for the byte cap, `o
 
 `cancel` is the exception to that table: it answers `200` for every outcome, including an unknown,
 expired, or foreign handle. See §6.5 for why.
+
+The CSRF `400` is the exception to **"every refusal is charged"** below. The check aborts the
+request before the limiter's deferred deduction can see a response, so it costs nothing — and that
+is the right way round twice over. It is safe, because the rejection happens on headers alone and
+never reads the 8 MiB body the budget exists to protect, making it strictly cheaper than the `409`
+beside it. And it is necessary, because the likeliest way to meet this status is a page left open
+across a logout: charging it would spend the whole budget on retries and then keep the user out for
+an hour *after* they had reloaded and fixed the problem. A refusal whose remedy is "reload" must not
+outlive the reload. `tests/test_csrf.py` pins the asymmetry, because an upgrade to either extension
+could reverse it silently.
 
 A session belonging to another user returns `404`, not `403`. The lookup is scoped by
 `user_id` and `album_id`, so a foreign handle simply does not resolve — and that is the right

@@ -1,5 +1,5 @@
-import io
 import os
+import tempfile
 import uuid
 import warnings
 import zipfile
@@ -9,8 +9,9 @@ from pathlib import Path
 from urllib.parse import urlparse, urljoin
 
 import magic
-from flask import request, abort, current_app
+from flask import request, abort, current_app, send_file
 from flask_login import current_user
+from werkzeug.utils import secure_filename
 from PIL import Image, ImageOps
 
 try:
@@ -300,26 +301,155 @@ def delete_photo_files(photo):
             fpath.unlink()
 
 
+# The per-user hourly budget for building an album archive, applied by the three
+# download routes (owner, upload-share, view-share). Declared here rather than
+# spelled out three times in two route modules, so the number and the reasoning
+# for it cannot drift apart.
+#
+# An album download is the most expensive thing one request can ask this app to
+# do: read every byte of the album off the media volume, DEFLATE it, write the
+# archive back to that same volume, then stream it out. build_album_zip has taken
+# memory out of the picture, but the transient disk and the CPU are still linear
+# in the album's size, and with --workers 2 --threads 4 eight of them run at once.
+# Unlimited — which is what these routes were, since the 200/hour default is not a
+# budget for gigabyte responses — a loop over one share link fills the upload
+# volume and starves the uploads sharing it.
+#
+# Ten, keyed by user id: rate_limit_key resolves an authenticated caller to
+# `user:<id>`, so this is a real per-account budget and not a bucket shared by
+# everyone behind one NAT. Sized for a human clicking a link. Downloading an album
+# is a once-a-trip action, and ten leaves room for the phone-on-hotel-wifi case
+# where a multi-gigabyte transfer dies and is retried several times. Flask-Limiter
+# scopes a limit per endpoint, so the worst honest hour from one account is thirty
+# archives across the three routes — still far below what it takes to hurt the
+# volume, while a hostile client is capped at ten album-sized stagings an hour
+# instead of as many as it can open connections for.
+ALBUM_ZIP_RATE_LIMIT = "10 per hour"
+
+
+# Sub-directory of UPLOAD_FOLDER that album archives are assembled in.
+#
+# UPLOAD_FOLDER and the instance directory are the only paths the production
+# container's non-root user can write to, and UPLOAD_FOLDER is the one sized for
+# media-scale bytes — so an archive of the media has to be staged beside the media.
+# A sub-directory rather than the folder itself, for the same reason `partials`
+# is one: /media/<filename> serves out of the top level by name, and nothing
+# half-written should ever be reachable there.
+ZIP_STAGING_SUBDIR = 'tmp'
+
+
 def build_album_zip(album):
-    """Return a BytesIO containing a ZIP of all photos in the album."""
-    buf = io.BytesIO()
+    """Assemble the album's ZIP into an unlinked temp file and return the open handle.
+
+    This used to build into an ``io.BytesIO`` and hand that to ``send_file``, which
+    meant peak RSS tracked the album's on-disk size for the whole life of the
+    response — videos are stored uncompressed and DEFLATE will not shrink them, so
+    the buffer *is* the album. Production runs ``--workers 2 --threads 4``: eight
+    concurrent downloads of one multi-gigabyte album is an OOM kill of the container,
+    which takes down uploads, browsing and login along with the download (issue #41).
+    Memory here is now bounded by ``zipfile``'s own copy buffer plus the socket's,
+    regardless of how large the album is.
+
+    **The tradeoff taken.** A temp file trades a memory problem for a disk one; a
+    streaming generator (``zipstream``-style, yielding the archive as it is produced)
+    would trade it for a protocol one. The file won because:
+
+    * the archive's size is known before the first byte goes out, so the response
+      keeps a real ``Content-Length`` — a generated response cannot have one, and
+      without it nginx buffers or chunk-encodes, browsers lose the progress bar and
+      the download-resume story gets worse, not better;
+    * an exception halfway through zipping is still a clean 500. A streamed response
+      has already sent ``200 OK``, so the same failure arrives at the client as a
+      truncated but apparently successful ZIP;
+    * ``zipfile`` incrementally deflating to a real file is stdlib; incrementally
+      deflating to a generator is not.
+
+    The cost is disk headroom: the archive is staged on the *same* volume as the
+    media it copies, so a download transiently needs about as much free space as the
+    album occupies, and the rate limits on the three download routes bound how many
+    such stagings can pile up. Nothing yet refuses an album that is too large to
+    stage — see the recommendation in issue #41.
+
+    **Cleanup is a kernel guarantee, not a teardown hook.** ``tempfile.TemporaryFile``
+    unlinks the file the instant it is created (on Linux it may never get a directory
+    entry at all), so the bytes are reclaimed when the last descriptor closes and
+    there is no name for anything to leak. A worker killed mid-download, an exception
+    between here and ``send_file``, a client that disconnects halfway — all of them
+    release the space, where an ``@after_this_request`` unlink would only cover the
+    first of those. The descriptor is closed by the WSGI server when it closes the
+    response iterator; the ``except`` below covers the window before it becomes one.
+
+    Returns the open, rewound file object. Callers that want a response should use
+    :func:`send_album_zip` rather than assembling the headers themselves.
+    """
     upload_dir = Path(current_app.config['UPLOAD_FOLDER'])
-    seen = {}
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
-        for photo in album.photos:
-            src = upload_dir / photo.stored_filename
-            if not src.exists():
-                continue
-            name = photo.original_filename
-            if name in seen:
-                seen[name] += 1
-                stem, suffix = Path(name).stem, Path(name).suffix
-                name = f"{stem}_{seen[name]}{suffix}"
-            else:
-                seen[name] = 0
-            zf.write(str(src), name)
-    buf.seek(0)
-    return buf
+    staging = upload_dir / ZIP_STAGING_SUBDIR
+    staging.mkdir(parents=True, exist_ok=True)
+
+    handle = tempfile.TemporaryFile(dir=staging, prefix='album-', suffix='.zip')
+    try:
+        seen = {}
+        # Exiting this `with` writes the central directory and leaves `handle`
+        # open: ZipFile only closes descriptors it opened itself, and this one was
+        # passed in. That is what lets the finished archive be returned as a
+        # still-open file rather than reopened by a name it does not have.
+        with zipfile.ZipFile(handle, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for photo in album.photos:
+                src = upload_dir / photo.stored_filename
+                if not src.exists():
+                    continue
+                name = photo.original_filename
+                if name in seen:
+                    seen[name] += 1
+                    stem, suffix = Path(name).stem, Path(name).suffix
+                    name = f"{stem}_{seen[name]}{suffix}"
+                else:
+                    seen[name] = 0
+                # zf.write streams the source file through a fixed-size buffer; it
+                # never holds a whole member in memory, which is the other half of
+                # why this function's footprint no longer scales with the album.
+                zf.write(str(src), name)
+    except BaseException:
+        handle.close()
+        raise
+
+    handle.seek(0)
+    return handle
+
+
+def send_album_zip(album):
+    """Return a file-download response carrying a ZIP of the album.
+
+    Lives here rather than in the three routes that need it (owner, upload-share,
+    view-share) so the archive's memory behaviour, its ``Content-Length`` and its
+    filename are decided once. The routes' job is authorisation; this is plumbing.
+
+    ``send_file`` only derives a length when it is handed a *path*, and the whole
+    point of :func:`build_album_zip` is that there is no path — so the length is
+    taken from the descriptor with ``fstat`` and set explicitly. Without that the
+    response falls back to chunked encoding and the browser shows an unbounded
+    progress bar for a download that may run into gigabytes.
+
+    ``conditional=False`` because there is nothing to be conditional about: the
+    archive is rebuilt per request and has no stable identity, so advertising
+    ``Accept-Ranges`` would promise a resumability that does not exist.
+    """
+    handle = build_album_zip(album)
+    try:
+        size = os.fstat(handle.fileno()).st_size
+        zip_name = (secure_filename(album.name or 'album') or 'album') + '.zip'
+        response = send_file(
+            handle,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=zip_name,
+            conditional=False,
+        )
+    except BaseException:
+        handle.close()
+        raise
+    response.content_length = size
+    return response
 
 def create_admin(username, email, password, session, print=print):
     """Create the admin user from ADMIN_USERNAME / ADMIN_EMAIL / ADMIN_PASSWORD env vars."""
