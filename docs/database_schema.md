@@ -7,6 +7,7 @@ erDiagram
         string username "unique, max 64"
         string email "unique, max 120"
         string password_hash "max 256"
+        string session_token "UUID, rotated on password change"
         bool is_admin "default false"
         datetime created_at
     }
@@ -69,6 +70,36 @@ erDiagram
     Album ||--o{ Photo : "contains"
     Album ||--o{ AlbumAccess : "grants"
 ```
+
+---
+
+## User.session_token — what makes a session revocable
+
+Not a secret about the password, and not a session store. It is one opaque value per
+user that rides along in every cookie the app issues, because Flask-Login writes
+`User.get_id()` into both the session cookie and the remember-me cookie, and
+`User.get_id()` returns `"<id>:<session_token>"` rather than the bare primary key.
+
+`extensions.load_user` compares the token half against the row on every request. So
+rewriting the column — `User.rotate_session_token()`, one UPDATE — invalidates every
+cookie already handed out for that user, on every device, with nothing to sweep and
+no server-side session table.
+
+Today one thing rotates it: changing a password on `/account`. That route re-issues
+the calling browser's cookie immediately afterwards, because rotation is
+indiscriminate and would otherwise sign the user out of the browser they changed it
+in. See [account_page_design.md](account_page_design.md) §2.
+
+Two consequences worth knowing before touching it:
+
+- **A cookie carrying a bare id is refused**, not grandfathered. Sessions created
+  before this column existed therefore ended on the deploy that added it — the
+  alternative was letting a stolen pre-deploy cookie outlive the password change made
+  to revoke it.
+- **The migration's `DEFAULT ''` is a placeholder, not a value.** SQLite will not take
+  a non-constant default on `ADD COLUMN`, so `_run_migrations()` backfills a distinct
+  UUID per row straight afterwards. A shared empty token would make every user's
+  cookie interchangeable.
 
 ---
 

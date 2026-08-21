@@ -29,6 +29,37 @@ class User(UserMixin, Base):
     albums: Mapped[list["Album"]] = relationship('Album', backref='owner', lazy=True, cascade='all, delete-orphan')
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    #: Rotated whenever every existing session for this user must stop working —
+    #: today that is a password change (docs/account_page_design.md §2).
+    #:
+    #: Not decoration, and not removable without removing :meth:`get_id` with it.
+    #: Flask-Login stores ``get_id()`` in the session cookie *and* in the
+    #: remember-me cookie, so whatever that returns is the whole of what a browser
+    #: presents to prove who it is. Returning the primary key — the default, and
+    #: what this app did before — makes a cookie immortal: it survives a password
+    #: change, because nothing in it depends on the password. Carrying this value
+    #: alongside the id is what lets one write invalidate every other device.
+    session_token: Mapped[str] = mapped_column(
+        String(36), nullable=False, default=lambda: str(uuid.uuid4())
+    )
+
+    def get_id(self):
+        """Return the identity Flask-Login writes into the session and remember cookies.
+
+        ``"<id>:<session_token>"``. The second half is verified on every request by
+        ``extensions.load_user``; a cookie carrying a stale token is not a stale
+        session, it is no session at all.
+        """
+        return f"{self.id}:{self.session_token}"
+
+    def rotate_session_token(self):
+        """Invalidate every cookie already issued for this user.
+
+        Caller commits. Note that this ends the *calling* browser's session too —
+        a route that rotates must re-issue the current session with ``login_user``
+        afterwards, or the user is signed out by their own password change.
+        """
+        self.session_token = str(uuid.uuid4())
 
     def set_password(self, password):
         """Hash and store the user's password using PBKDF2-SHA256 with 600,000 rounds."""

@@ -39,3 +39,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Agent worktrees and local Claude Code state
+.claude/

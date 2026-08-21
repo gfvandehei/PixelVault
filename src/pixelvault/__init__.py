@@ -71,8 +71,9 @@ def create_app():
     app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
     app.config['SESSION_COOKIE_SECURE'] = SESSION_COOKIE_SECURE
     app.config['PERMANENT_SESSION_LIFETIME'] = 86400 * 30
-
     # ── "Remember me" cookie ───────────────────────────────────────────────
+    # (#34 set the same three flags independently, for the CSRF reason below;
+    # this block supersedes it and adds the lifetime cap.)
     # Flask-Login's remember_token is a second, independent authenticator: given
     # one, Flask-Login rebuilds a full session from it with no session cookie
     # present at all. It therefore needs *at least* everything the session cookie
@@ -301,7 +302,7 @@ def _validate_mail_config():
 
 def _run_migrations():
     """Add new columns to existing databases without breaking old deployments."""
-    from .models import Album
+    from .models import Album, User
 
     with db.engine.connect() as conn:
         for stmt in [
@@ -348,6 +349,13 @@ def _run_migrations():
             # database created by create_all() and one arrived at by migration end up
             # with the same schema rather than two indexes doing one job.
             "CREATE INDEX IF NOT EXISTS ix_allowed_email_token_hash ON allowed_email (token_hash)",
+            # The per-user session token behind the account page's "log out my
+            # other devices" (docs/account_page_design.md §2). The empty literal
+            # is a placeholder, not a value: SQLite will not take a non-constant
+            # DEFAULT on ADD COLUMN, and a token shared by every row would make
+            # every user's cookie interchangeable. The backfill below gives each
+            # row its own, exactly as view_token does.
+            "ALTER TABLE user ADD COLUMN session_token VARCHAR(36) NOT NULL DEFAULT ''",
         ]:
             try:
                 conn.execute(db.text(stmt))
@@ -358,4 +366,9 @@ def _run_migrations():
     for album in albums:
         album.view_token = str(uuid.uuid4())
     if albums:
+        db.session.commit()
+    users = db.session.query(User).filter(User.session_token == '').all()
+    for user in users:
+        user.session_token = str(uuid.uuid4())
+    if users:
         db.session.commit()

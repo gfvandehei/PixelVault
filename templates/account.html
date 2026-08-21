@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Your Account — PixelVault{% endblock %}
+
+{% block head %}
+<style>
+  /* Deliberately the same shapes create_album.html uses: this is a settings page,
+     and inventing a second card idiom for it would make the app look assembled
+     from two products. */
+  .account-wrap { max-width: 560px; }
+
+  .form-section {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.75rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .form-section h2 {
+    font-family: var(--font-serif);
+    font-size: 1.1rem;
+    font-weight: 400;
+    margin-bottom: 1.25rem;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.75rem;
+  }
+
+  .page-head {
+    margin-bottom: 1.5rem;
+  }
+
+  .page-head h1 {
+    font-family: var(--font-serif);
+    font-size: 2rem;
+    font-weight: 300;
+  }
+
+  .page-head p {
+    color: var(--text-dim);
+    font-size: 0.9rem;
+  }
+
+  /* Identity is read, not edited, so it is rendered as facts rather than as
+     inputs nobody may type in — a disabled-looking form field reads as something
+     the reader failed to fill in and generates a support question. */
+  .facts { display: flex; flex-direction: column; gap: 1rem; }
+
+  .fact dt {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 0.15rem;
+  }
+
+  .fact dd { font-size: 1rem; color: var(--text); word-break: break-word; }
+
+  .badge {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--amber);
+    border: 1px solid var(--amber-dim);
+    border-radius: 3px;
+    padding: 0.1rem 0.4rem;
+    vertical-align: middle;
+    margin-left: 0.4rem;
+  }
+
+  .hint {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 0.3rem;
+    line-height: 1.5;
+  }
+
+  .form-actions { display: flex; gap: 0.75rem; align-items: center; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="account-wrap">
+
+  <div class="page-head">
+    <h1>Your account</h1>
+    <p>Your sign-in details, and the one thing on them you can change yourself.</p>
+  </div>
+
+  <div class="form-section">
+    <h2>Details</h2>
+    <dl class="facts">
+      <div class="fact">
+        <dt>Username</dt>
+        <dd>
+          {{ current_user.username }}
+          {% if current_user.is_admin %}<span class="badge">Admin</span>{% endif %}
+        </dd>
+      </div>
+      <div class="fact">
+        <dt>Email</dt>
+        <dd>{{ current_user.email }}</dd>
+        <p class="hint">
+          Your username and email address are fixed. Ask an admin
+          {%- if admin_contact %} (<a href="mailto:{{ admin_contact }}">{{ admin_contact }}</a>){% endif %}
+          if either needs to change.
+        </p>
+      </div>
+      <div class="fact">
+        <dt>Member since</dt>
+        <dd>{% if current_user.created_at %}{{ current_user.created_at.day }} {{ current_user.created_at.strftime('%B %Y') }}{% else %}&mdash;{% endif %}</dd>
+      </div>
+    </dl>
+  </div>
+
+  <div class="form-section">
+    <h2>Change password</h2>
+    {#
+      No hidden token field and no CSRF token, matching every other form in the app
+      — the current-password field is what makes this form safe to POST, and the
+      session cookie is SameSite=Lax. See docs/account_page_design.md §7.
+    #}
+    <form method="POST" action="{{ url_for('account_change_password') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="form-group">
+        <label for="current_password">Current password</label>
+        <input type="password" id="current_password" name="current_password"
+               autocomplete="current-password" required autofocus>
+      </div>
+      <div class="form-group">
+        <label for="new_password">New password</label>
+        <input type="password" id="new_password" name="new_password"
+               autocomplete="new-password" minlength="8" required>
+        <p class="hint">At least 8 characters, and different from your current one.</p>
+      </div>
+      <div class="form-group">
+        <label for="confirm_password">Confirm new password</label>
+        <input type="password" id="confirm_password" name="confirm_password"
+               autocomplete="new-password" minlength="8" required>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Change password</button>
+        <a href="{{ url_for('dashboard') }}" class="btn btn-ghost">Cancel</a>
+      </div>
+      <p class="hint" style="margin-top:1rem;">
+        Changing your password signs you out everywhere else. This browser stays
+        signed in; every other device will need the new password.
+      </p>
+    </form>
+  </div>
+
+</div>
+{% endblock %}

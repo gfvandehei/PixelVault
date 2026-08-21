@@ -37,7 +37,7 @@ from email.utils import formatdate, make_msgid
 from flask import render_template
 
 from . import invites
-from .config import MAIL_FROM, MAIL_FROM_NAME, PUBLIC_BASE_URL
+from .config import ADMIN_CONTACT, MAIL_FROM, MAIL_FROM_NAME, PUBLIC_BASE_URL
 from .mailer import MailError
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 #: either part exists, and it must read identically whichever part a client shows.
 INVITE_SUBJECT = 'You have been invited to PixelVault'
 
+#: Subject of the password-change notice. Written as a statement of fact rather
+#: than a question ("Was this you?") so it reads correctly in a preview pane, which
+#: is where most recipients will see the whole of it.
+PASSWORD_CHANGED_SUBJECT = 'Your PixelVault password was changed'
+
 #: Path the invite token is presented at. Must match the ``invite_link`` route in
 #: design §13's endpoint table; the email is written before that route exists, so
 #: this constant is the only place the two can drift.
@@ -55,8 +60,11 @@ INVITE_PATH = '/invite'
 
 # ── Human-readable expiry ──────────────────────────────────────────────────
 
-def _format_expiry(expires_at: datetime) -> str:
-    """Render an expiry instant as a date a person can act on.
+def _format_instant(moment: datetime) -> str:
+    """Render an instant as a date a person can act on.
+
+    Used for an invite's expiry and for the moment a password changed — both are
+    UTC timestamps out of the database being read by someone who may not be in UTC.
 
     Explicitly labelled UTC, because that is what the column holds and an
     unlabelled time is worse than none — an invitee in UTC+10 reading a bare
@@ -66,7 +74,7 @@ def _format_expiry(expires_at: datetime) -> str:
     that directly is glibc-only and would break the moment anyone runs this on a
     non-Linux host.
     """
-    return f"{expires_at.day} {expires_at:%B %Y} at {expires_at:%H:%M} UTC"
+    return f"{moment.day} {moment:%B %Y} at {moment:%H:%M} UTC"
 
 
 def _humanise_remaining(expires_at: datetime, now: datetime) -> str:
@@ -131,7 +139,7 @@ def build_invite_email(invite, token, *, base_url=PUBLIC_BASE_URL,
         'email': invite.email,
         'site_url': base_url.rstrip('/'),
         'username': invite.prefill_username or '',
-        'expires_at_text': _format_expiry(invite.expires_at),
+        'expires_at_text': _format_instant(invite.expires_at),
         'expires_in_text': _humanise_remaining(invite.expires_at, datetime.utcnow()),
     }
 
@@ -190,3 +198,77 @@ def send_invite(mailer, session, invite, token) -> None:
 
     invites.mark_sent(session, invite)
     logger.info("Invite %s emailed to %s", invite.id, invite.email)
+
+
+# ── Password-change notice ─────────────────────────────────────────────────
+
+def build_password_changed_email(user, *, changed_at=None, base_url=PUBLIC_BASE_URL,
+                                 from_addr=MAIL_FROM, from_name=MAIL_FROM_NAME,
+                                 contact=ADMIN_CONTACT) -> EmailMessage:
+    """Compose the "your password was changed" notice for ``user``.
+
+    Same shape as :func:`build_invite_email` — text part first, HTML alternative
+    second, ``Date`` and ``Message-ID`` set here rather than left to the relay —
+    and two deliberate differences:
+
+    * **It carries no link and no token.** There is no reset flow yet (issue #33),
+      so a recipient who did not make this change is told to contact a human. A
+      message that arrives unexpectedly is exactly the message an attacker would
+      want to imitate with a link in it; this one has nothing to click.
+    * **``base_url`` is decorative.** The invite refuses to compose without an
+      origin because its whole payload is a URL. Here the origin only names which
+      site is being talked about, so an unset ``PUBLIC_BASE_URL`` degrades to
+      "PixelVault" rather than raising — an account with no notice is worse than a
+      notice with no hostname.
+
+    ``changed_at`` defaults to now and is stated in labelled UTC, because that is
+    what the database holds and an unlabelled time tells a reader in another zone
+    something false rather than something vague.
+    """
+    changed_at = changed_at or datetime.utcnow()
+    site_url = (base_url or '').rstrip('/')
+    context = {
+        'username': user.username,
+        'email': user.email,
+        'site_url': site_url,
+        'site_name': site_url or 'PixelVault',
+        'changed_at_text': _format_instant(changed_at),
+        'contact': contact or '',
+    }
+
+    message = EmailMessage()
+    message['Subject'] = PASSWORD_CHANGED_SUBJECT
+    local, _, domain = from_addr.partition('@')
+    message['From'] = Address(display_name=from_name, username=local, domain=domain)
+    message['To'] = user.email
+    message['Date'] = formatdate(localtime=True)
+    message['Message-ID'] = make_msgid(domain=domain or None)
+
+    message.set_content(render_template('email/password_changed.txt', **context))
+    message.add_alternative(render_template('email/password_changed.html', **context),
+                            subtype='html')
+    return message
+
+
+def send_password_changed(mailer, user, *, changed_at=None) -> None:
+    """Tell ``user`` their password changed. Never the reason a change is lost.
+
+    Called from ``routes/account.py`` *after* the new password is committed, so
+    nothing here can undo it — which is why the one configuration fault that would
+    raise is handled instead of propagated: with ``MAIL_FROM`` empty there is no
+    sender to build a message from, and crashing a completed password change over
+    an unconfigured relay would turn a missing courtesy email into a 500 on the
+    account page.
+
+    ``MailError`` *is* allowed out, because the caller can say something useful
+    about a relay that refused delivery. Nothing token-shaped is logged here; there
+    is nothing secret in this message to begin with.
+    """
+    if not MAIL_FROM:
+        logger.info("Password changed for user %s; no MAIL_FROM configured, notice skipped",
+                    user.id)
+        return
+
+    message = build_password_changed_email(user, changed_at=changed_at)
+    mailer.send(message)
+    logger.info("Password-change notice sent to user %s", user.id)

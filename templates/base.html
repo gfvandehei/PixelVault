@@ -122,6 +122,8 @@
 
     .nav-links .btn-primary:hover { background: #e8bc6a; }
 
+    .nav-links a.only-narrow { display: none; }
+
     .nav-user-menu {
       position: relative;
       display: inline-flex;
@@ -401,6 +403,7 @@
       .nav-links { gap: 0.1rem; }
       .nav-links a { padding: 0.4rem 0.5rem; font-size: 0.8rem; }
       .nav-user-menu { display: none; }
+      .nav-links a.only-narrow { display: inline-block; }
       .page-header-actions { flex-direction: column; }
       .page-header h1 { font-size: 1.7rem; }
       .flashes { right: 1rem; left: 1rem; max-width: none; }
@@ -425,9 +428,15 @@
         <a href="{{ url_for('admin_panel') }}">Admin</a>
       {% endif %}
       <a href="{{ url_for('create_album') }}" class="btn-primary btn btn-sm">+ New Album</a>
+      {# The user dropdown is hidden below 640px, so Account and Log out would be
+         unreachable on a phone. These two take its place there and are hidden
+         everywhere else, rather than duplicating links on the desktop bar. #}
+      <a href="{{ url_for('account') }}" class="only-narrow">Account</a>
+      <a href="{{ url_for('logout') }}" class="only-narrow">Log out</a>
       <div class="nav-user-menu">
         <span class="nav-user">{{ current_user.username }} &#x25BE;</span>
         <div class="nav-dropdown">
+          <a href="{{ url_for('account') }}">Account</a>
           <a href="https://github.com/gfvandehei/PixelVault/issues/new" target="_blank" rel="noopener">Report an issue</a>
           <a href="{{ url_for('logout') }}">Log out</a>
         </div>
